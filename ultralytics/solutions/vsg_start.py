@@ -1,9 +1,9 @@
 import multiprocessing
 import threading
 import time
-from models.ultralytics_model.ultralytics.ultralytics.engine.vsg_capture_yolo_inference import CaptureInferenceProcess
-from models.ultralytics_model.ultralytics.ultralytics.engine.vsg_detection_handler import process_detections
-from models.ultralytics_model.ultralytics.ultralytics.solutions.vsg_udp_worker import UDPWorker
+from ultralytics.engine.vsg_capture_yolo_inference import CaptureInferenceProcess
+from ultralytics.engine.vsg_detection_handler import process_detections
+from ultralytics.solutions.vsg_udp_worker import UDPWorker
 
 DEBUG = False  # Global flag to enable debugging mode (save latest frame to file)
 
