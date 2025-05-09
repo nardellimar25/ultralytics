@@ -9,6 +9,7 @@ MODEL_PATH = "yolov8n.pt"
 IMG_SZ = 128
 CONF_THRESHOLD = 0.5
 
+
 class CaptureInferenceProcess(multiprocessing.Process):
     """
     Process to capture video frames from a webcam, perform YOLO inference,
@@ -49,3 +50,6 @@ class CaptureInferenceProcess(multiprocessing.Process):
             self.detection_callback(frame.copy(), results, self.pipeline)
 
         cap.release()
+
+
+

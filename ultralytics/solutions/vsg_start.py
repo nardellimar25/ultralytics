@@ -8,6 +8,7 @@ from models.ultralytics_model.ultralytics.ultralytics.engine.vsg_capture_yolo_in
 from models.ultralytics_model.ultralytics.ultralytics.engine.vsg_detection_handler import process_detections
 from models.ultralytics_model.ultralytics.ultralytics.solutions.vsg_udp_worker import UDPWorker
 
+
 DEBUG = False  # Global flag to enable saving the latest frame to disk
 
 def create_global_pipeline():
