@@ -1,55 +1,50 @@
-import cv2
-import torch
-import time
-import multiprocessing
+#_vsg_capture_yolo_inference.py
+"""
+inference.py - Defines YoloInference class to
+encapsulate YOLO model loading, frame inference,
+and metadata packing for GStreamer streaming.
+"""
+import struct
 from ultralytics import YOLO
+from typing import List, Tuple
 
-# YOLO model configuration constants
-MODEL_PATH = "yolov8n.pt"
-IMG_SZ = 128
-CONF_THRESHOLD = 0.5
+detect_t = Tuple[float, Tuple[int, int, int, int]]
 
-
-class CaptureInferenceProcess(multiprocessing.Process):
+class YoloInference:
     """
-    Process to capture video frames from a webcam, perform YOLO inference,
-    and call a callback with the results.
+    Encapsulates YOLO model loading and inference logic.
     """
-    def __init__(self, detection_callback, pipeline):
+    def __init__(self, model_path: str, img_size: int, conf_thresh: float):
+        self.model = YOLO(model_path)
+        self.img_size = img_size
+        self.conf_thresh = conf_thresh
+
+    def run(self, frame) -> List[detect_t]:
         """
-        :param detection_callback: callable that takes (frame, detection_results, pipeline)
-        :param pipeline: global pipeline dictionary containing queues.
+        Run inference on a single frame and return list of
+        (confidence, (x1, y1, x2, y2)) detections.
         """
-        super().__init__(daemon=True)
-        self.detection_callback = detection_callback
-        self.pipeline = pipeline
-        self.model = YOLO(MODEL_PATH)
+        results = self.model.predict(
+            frame, imgsz=self.img_size,
+            conf=self.conf_thresh, classes=[0]
+        )
+        detections = []
+        for r in results:
+            for det in r.boxes:
+                x1, y1, x2, y2 = det.xyxy[0].int().tolist()
+                score = float(det.conf[0])
+                detections.append((score, (x1, y1, x2, y2)))
+        return detections
 
-    def run(self):
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("Error: Cannot open webcam.")
-            return
-
-        # Set capture resolution.
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-        time.sleep(0.5)  # Warm-up time for camera
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
-
-            # Perform YOLO inference on the captured frame.
-            with torch.no_grad():
-                results = self.model.predict(frame, imgsz=IMG_SZ, conf=CONF_THRESHOLD, classes=[0])
-
-            # Call the detection callback with the frame and inference results.
-            self.detection_callback(frame.copy(), results, self.pipeline)
-
-        cap.release()
-
-
-
+    @staticmethod
+    def pack_metadata(detections: List[detect_t]) -> bytes:
+        """
+        Pack metadata into bytes for UDP streaming:
+        uint16 number of detections,
+        followed by repeating uint8(conf)*4 uint16(x1,y1,x2,y2).
+        """
+        buf = struct.pack('>H', len(detections))
+        for score, (x1, y1, x2, y2) in detections:
+            c = min(int(score * 255), 255)
+            buf += struct.pack('>B4H', c, x1, y1, x2, y2)
+        return buf
