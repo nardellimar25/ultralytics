@@ -1,5 +1,7 @@
-# vsg_sender.py - Main script to capture webcam frames,
-# perform YOLO inference, and stream raw frames e bounding‐box metadata
+"""
+vsg_sender.py - Main script to capture webcam frames,
+perform YOLO inference, and stream raw frames with bounding-box metadata over UDP.
+"""
 
 import cv2
 import time
@@ -7,7 +9,7 @@ import multiprocessing
 import os
 import gi
 
-# Import delle costanti da vsg_config.ini
+# Load constants from vsg_config.ini
 from models.ultralytics_model.ultralytics.ultralytics.utils.vsg_config import (
     MODEL_PATH, IMG_SZ, CONF_THRESHOLD,
     UDP_IP, UDP_PORT_RAW, UDP_PORT_META,
@@ -17,7 +19,7 @@ from models.ultralytics_model.ultralytics.ultralytics.utils.vsg_config import (
 from models.ultralytics_model.ultralytics.ultralytics.engine.vsg_capture_yolo_inference import YoloInference
 from models.ultralytics_model.ultralytics.ultralytics.solutions.vsg_gstreamer import GstStreamer
 
-# Inizializzo GStreamer
+# Initialize GStreamer
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 Gst.init(None)
@@ -25,42 +27,46 @@ Gst.init(None)
 
 class MetaStreamer:
     """
-    Piccola classe per inviare metadata via UDP con i caps
-    esatti che si aspetta il receiver (application/x-meta, media=meta).
+    Simple class to send metadata over UDP using the expected caps
+    (application/x-meta, media=meta) for the receiver.
     """
     def __init__(self, name: str, caps: str, sink_desc: str):
         self.name = name
-        # Appsrc senza framerate, solo media=meta
+        # Create an appsrc element without frame rate (metadata only)
         pipeline_desc = (
             f'appsrc name={name} is-live=true block=true format=TIME '
             f'caps={caps} '
             f'{sink_desc}'
         )
         self.pipeline = Gst.parse_launch(pipeline_desc)
-        self.appsrc   = self.pipeline.get_by_name(name)
+        self.appsrc = self.pipeline.get_by_name(name)
         self.pipeline.set_state(Gst.State.PLAYING)
 
     def push(self, data_bytes: bytes) -> None:
         """
-        Push dei soli bytes, senza PTS/duration (non servono sui metadata).
+        Push raw bytes into the pipeline (no PTS/duration needed for metadata).
         """
         buf = Gst.Buffer.new_allocate(None, len(data_bytes), None)
         buf.fill(0, data_bytes)
         self.appsrc.emit('push-buffer', buf)
 
     def stop(self) -> None:
+        """
+        Cleanly stop the GStreamer pipeline.
+        """
         self.pipeline.set_state(Gst.State.NULL)
+
 
 
 def main():
     """
     Initialize the YOLO inference engine and GStreamer streamers,
-    then loop capturing frames, running inference, and streaming data.
+    then continuously capture frames, perform inference, and send data.
     """
-    # Initialize inference
+    # Create YOLO inference instance
     infer = YoloInference(MODEL_PATH, IMG_SZ, CONF_THRESHOLD)
 
-    # Define GStreamer caps e sink per raw frames
+    # Define GStreamer caps and sink for raw video frames
     raw_caps = (
         f'video/x-raw,format=BGR,width={FRAME_WIDTH},'
         f'height={FRAME_HEIGHT}'
@@ -72,23 +78,23 @@ def main():
         f'! udpsink host={UDP_IP} port={UDP_PORT_RAW} sync=false'
     )
 
-    # Caps e sink per metadata
+    # Define caps and sink for metadata
     meta_caps = 'application/x-meta,media=(string)meta'
     meta_sink = f'! udpsink host={UDP_IP} port={UDP_PORT_META} sync=false'
 
-    # Creo gli streamer
-    raw_streamer  = GstStreamer('raw_src', raw_caps,  raw_sink,  FRAMERATE)
+    # Instantiate streamers
+    raw_streamer = GstStreamer('raw_src', raw_caps, raw_sink, FRAMERATE)
     meta_streamer = MetaStreamer('meta_src', meta_caps, meta_sink)
 
-    # Apri webcam
+    # Open webcam
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-    time.sleep(0.5)  # Allow camera to warm up
+    time.sleep(0.5)  # Allow camera sensor to stabilize
 
-    # Percorso debug
+    # Setup debug output path
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-    debug_path   = os.path.join(project_root, DEBUG_DIR)
+    debug_path = os.path.join(project_root, DEBUG_DIR)
 
     try:
         while True:
@@ -97,13 +103,13 @@ def main():
                 time.sleep(0.01)
                 continue
 
-            # Inference YOLO
-            dets = infer.run(frame)
+            # Perform YOLO inference
+            detections = infer.run(frame)
 
-            # DEBUG: disegna boxes su debug.jpg
-            if DEBUG and dets:
+            # DEBUG: draw bounding boxes and save an image
+            if DEBUG and detections:
                 debug_img = frame.copy()
-                for score, (x1, y1, x2, y2) in dets:
+                for score, (x1, y1, x2, y2) in detections:
                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(
                         debug_img,
@@ -115,11 +121,12 @@ def main():
                 debug_file = os.path.join(debug_path, 'debug.jpg')
                 cv2.imwrite(debug_file, debug_img)
 
-            # Stream raw frame e metadata
+            # Stream raw frame and metadata
             raw_streamer.push(frame.tobytes())
-            meta_streamer.push(infer.pack_metadata(dets))
+            meta_streamer.push(infer.pack_metadata(detections))
 
     except KeyboardInterrupt:
+        # Exit cleanly on Ctrl+C
         pass
     finally:
         cap.release()

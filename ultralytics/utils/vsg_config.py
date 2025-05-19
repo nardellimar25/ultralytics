@@ -29,6 +29,9 @@ FRAMERATE     = parser.getint('VIDEO', 'framerate')
 # DEBUG
 DEBUG       = parser.getboolean('DEBUG', 'debug', fallback=False)
 DEBUG_DIR   = parser.get('DEBUG', 'debug_dir', fallback='debug_frames')
-
 if DEBUG:
-    os.makedirs(os.path.join(BASE_DIR, os.pardir, DEBUG_DIR), exist_ok=True)
+     # Create debug directory if it doesn't exist (no error if it already exists)
+     os.makedirs(
+         os.path.join(BASE_DIR, os.pardir, DEBUG_DIR),
+         exist_ok=True
+    )
