@@ -1,4 +1,3 @@
-#vsg_config.py
 """
 Load configuration from INI file using configparser.
 """
@@ -26,3 +25,10 @@ UDP_PORT_META = parser.getint('NETWORK', 'udp_port_meta')
 FRAME_WIDTH   = parser.getint('VIDEO', 'frame_width')
 FRAME_HEIGHT  = parser.getint('VIDEO', 'frame_height')
 FRAMERATE     = parser.getint('VIDEO', 'framerate')
+
+# DEBUG
+DEBUG       = parser.getboolean('DEBUG', 'debug', fallback=False)
+DEBUG_DIR   = parser.get('DEBUG', 'debug_dir', fallback='debug_frames')
+
+if DEBUG:
+    os.makedirs(os.path.join(BASE_DIR, os.pardir, DEBUG_DIR), exist_ok=True)
