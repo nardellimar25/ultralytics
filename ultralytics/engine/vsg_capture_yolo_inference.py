@@ -56,7 +56,7 @@ class YoloInference:
         :param detections: List of detection tuples.
         :return: Byte string containing packed metadata.
         """
-        # Use native host byte order (little-endian on x86 and Renesas)
+        # Use native host byte order (little-endian on x86 and ARM)
         buf = struct.pack('H', len(detections))
         for score, (x1, y1, x2, y2) in detections:
             c = min(int(score * 255), 255)
