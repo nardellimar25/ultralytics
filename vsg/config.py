@@ -8,8 +8,7 @@ class Config:
         self.pipeline = self.config['Pipeline']
         self.yolo = self.config['YOLO']
         self.udp = self.config['UDP']
-        self.env = self.config['Env']
-
+    
     def get(self, section, key, fallback=None):
         return self.config[section].get(key, fallback)
 
