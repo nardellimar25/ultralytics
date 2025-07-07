@@ -1,17 +1,21 @@
 import signal
+import os,sys
+
+LD_PRELOAD_VAL = "/usr/lib/aarch64-linux-gnu/libgomp.so.1:/usr/lib/aarch64-linux-gnu/libGLdispatch.so.0"
+if os.environ.get("LD_PRELOAD", "") != LD_PRELOAD_VAL:
+    os.environ["LD_PRELOAD"] = LD_PRELOAD_VAL
+    os.execve(sys.executable, [sys.executable] + sys.argv, os.environ)
+
 import numpy as np
 import cv2
 
 from config import config
-from env_patch import ensure_ld_preload
 from gst_pipeline import build_pipeline, gst_init_and_run
 from yolo_inference import yolo_detect
 from udp_sender import UDPMetaSender
 
-# 1) LD_PRELOAD check
-ensure_ld_preload()
 
-# 2) Configurazione pipeline
+
 WIDTH = int(config.pipeline.get("width"))
 HEIGHT = int(config.pipeline.get("height"))
 FPS = int(config.pipeline.get("fps"))
