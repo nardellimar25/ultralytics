@@ -1,0 +1,82 @@
+FROM ubuntu:22.04
+ 
+ENV DEBIAN_FRONTEND=noninteractive
+ 
+# 1. Install Python 3.10, pip, and system dependencies
+
+RUN apt-get update && \
+
+    apt-get install -y --no-install-recommends \
+
+        python3.10 python3.10-venv python3.10-distutils python3-pip python3.10-dev \
+
+        build-essential \
+
+        # OpenCV and scientific libraries
+
+        python3-opencv libatlas-base-dev libjpeg-dev libpng-dev libglib2.0-0 libsm6 libxext6 libxrender-dev libgl1 \
+
+        # Audio/video support
+
+        ffmpeg libportaudio2 libportaudiocpp0 portaudio19-dev \
+
+        # GStreamer core, plugins, and GI bindings
+
+        gstreamer1.0-tools gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+
+        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+
+        gstreamer1.0-plugins-ugly gstreamer1.0-libav python3-gi \
+
+        # Utilities
+
+        curl wget git sudo \
+&& rm -rf /var/lib/apt/lists/*
+ 
+# 2. Make "python3" point to python3.10
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+ 
+# 3. Upgrade pip and setuptools
+
+RUN python3 -m pip install --upgrade pip setuptools wheel
+ 
+# 4. Install specific versions of torch, torchvision, and torchaudio (CPU only)
+
+RUN pip3 install --no-cache-dir \
+
+        torch==2.7.0 \
+
+        torchvision \
+
+        torchaudio \
+
+        --index-url https://download.pytorch.org/whl/cpu
+ 
+# 5. Install the required ultralytics version
+
+RUN pip3 install --no-cache-dir ultralytics==8.3.140
+ 
+# 6. (Optional) Other useful Python libraries (add your own as needed)
+
+RUN pip3 install --no-cache-dir \
+
+        cython numpy pillow pyaudio six psutil edge_impulse_linux
+ 
+# 7. Print installed versions for debugging purposes
+
+RUN python3 -c "import sys; print('Python:', sys.version)"
+
+RUN python3 -c "import torch; print('Torch:', torch.__version__)"
+
+RUN python3 -c "import ultralytics; print('Ultralytics:', ultralytics.__version__)"
+ 
+# 8. Set the working directory
+
+WORKDIR /app
+ 
+# 9. Default command on container start
+
+CMD ["bash"]
+
+ 
