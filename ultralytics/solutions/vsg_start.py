@@ -8,6 +8,10 @@ import time
 import multiprocessing
 import os
 import gi
+import statistics
+
+# Load enum from test_bench.py
+from models.ultralytics_model.ultralytics.ultralytics.solutions.test_bench import Runs
 
 # Load constants from vsg_config.ini
 from models.ultralytics_model.ultralytics.ultralytics.utils.vsg_config import (
@@ -65,7 +69,8 @@ def main():
     """
     # Create YOLO inference instance
     infer = YoloInference(MODEL_PATH, IMG_SZ, CONF_THRESHOLD)
-
+    print("\nMODEL PATH: ",MODEL_PATH,"\n")
+    print("IMG_SZ: ",IMG_SZ)
     # Define GStreamer caps and sink for raw video frames
     raw_caps = (
         f'video/x-raw,format=BGR,width={FRAME_WIDTH},'
@@ -96,18 +101,42 @@ def main():
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     debug_path = os.path.join(project_root, DEBUG_DIR)
 
+    # Init variables for test benching times and mem usage
+    capread_times = []
+    YOLOinfer_times = []
+    count = 0
+    runs = [Runs.SHORT.value, Runs.MED.value, Runs.LONG.value]
+    
+
     try:
         while True:
+            st_time = time.time()
             ret, frame = cap.read()
+            end_time = time.time()
             if not ret:
                 time.sleep(0.01)
                 continue
-
+            capread_time = end_time - st_time
+            
             # Perform YOLO inference
+            st_time = time.time()
             detections = infer.run(frame)
-
+            end_time = time.time()
+            YOLOinfer_time = end_time - st_time
+            
+            #print("\nTime for cap.read(): ", capread_time,"s")
+            #print("\nTime for YOLO inference: ", YOLOinfer_time,"s")
+            
             # DEBUG: draw bounding boxes and save an image
+            # DEBUG: save timers for cap.read and yolo inference 
             if DEBUG and detections:
+                count += 1
+                if(count < runs[-1]):
+                    capread_times.append(capread_time)
+                    YOLOinfer_times.append(YOLOinfer_time)
+                else:
+                    print("\ndone!!\n")
+
                 debug_img = frame.copy()
                 for score, (x1, y1, x2, y2) in detections:
                     cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -129,6 +158,15 @@ def main():
         # Exit cleanly on Ctrl+C
         pass
     finally:
+        # DEBUG: print mean time and standard deviation for cap.read and yolo inference, in different run sizes
+        if DEBUG:
+            capread_times.pop(0)    #discard first time measured
+            YOLOinfer_times.pop(0)    #discard first time measured
+            for run in runs:
+                print("[ RUNS:",run,"]\nMean time cap.read(): ", statistics.mean(capread_times[:run]),"s")
+                print("[ RUNS:",run,"]\nStandard deviation for cap.read(): ", statistics.stdev(capread_times[:run]))
+                print("[ RUNS:",run,"]\nMean time YOLO inference: ", statistics.mean(YOLOinfer_times[:run]),"s")
+                print("[ RUNS:",run,"]\nStandard deviation for YOLO inference: ", statistics.stdev(YOLOinfer_times[:run]))
         cap.release()
         raw_streamer.stop()
         meta_streamer.stop()
