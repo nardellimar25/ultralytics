@@ -9,6 +9,8 @@ import multiprocessing
 import os
 import gi
 import statistics
+import psutil
+import sys
 
 # Load enum from test_bench.py
 from models.ultralytics_model.ultralytics.ultralytics.solutions.test_bench import Runs
@@ -69,8 +71,9 @@ def main():
     """
     # Create YOLO inference instance
     infer = YoloInference(MODEL_PATH, IMG_SZ, CONF_THRESHOLD)
-    print("\nMODEL PATH: ",MODEL_PATH,"\n")
+    print("MODEL PATH: ",MODEL_PATH,"")
     print("IMG_SZ: ",IMG_SZ)
+
     # Define GStreamer caps and sink for raw video frames
     raw_caps = (
         f'video/x-raw,format=BGR,width={FRAME_WIDTH},'
@@ -106,6 +109,7 @@ def main():
     YOLOinfer_times = []
     count = 0
     runs = [Runs.SHORT.value, Runs.MED.value, Runs.LONG.value]
+    show_results = False
     
 
     try:
@@ -116,39 +120,50 @@ def main():
             if not ret:
                 time.sleep(0.01)
                 continue
-            capread_time = end_time - st_time
+            capread_time = end_time - st_time  
+            
             
             # Perform YOLO inference
             st_time = time.time()
             detections = infer.run(frame)
             end_time = time.time()
             YOLOinfer_time = end_time - st_time
+            print("detections: ", detections)
             
-            #print("\nTime for cap.read(): ", capread_time,"s")
-            #print("\nTime for YOLO inference: ", YOLOinfer_time,"s")
+            
             
             # DEBUG: draw bounding boxes and save an image
             # DEBUG: save timers for cap.read and yolo inference 
-            if DEBUG and detections:
+            if DEBUG:
                 count += 1
                 if(count < runs[-1]):
                     capread_times.append(capread_time)
                     YOLOinfer_times.append(YOLOinfer_time)
                 else:
-                    print("\ndone!!\n")
+                    print("done!!")
+                    show_results = True
 
-                debug_img = frame.copy()
-                for score, (x1, y1, x2, y2) in detections:
-                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(
-                        debug_img,
-                        f"{score:.2f}",
-                        (x1, max(y1 - 5, 0)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
-                    )
-                os.makedirs(debug_path, exist_ok=True)
-                debug_file = os.path.join(debug_path, 'debug.jpg')
-                cv2.imwrite(debug_file, debug_img)
+                if detections:
+                    # DRAM memory occupance
+                    if count == 1:
+                        frameSz = sys.getsizeof(frame)
+                        detectionsSz = sys.getsizeof(detections)         
+                        det_float_size = sys.getsizeof(detections[0][0])
+                        det_bbox_size = sys.getsizeof(detections[0][1])
+                        det_int_size = sys.getsizeof(detections[0][1][0])
+                        
+                    debug_img = frame.copy()
+                    for score, (x1, y1, x2, y2) in detections:
+                        cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(
+                            debug_img,
+                            f"{score:.2f}",
+                            (x1, max(y1 - 5, 0)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1
+                        )
+                    os.makedirs(debug_path, exist_ok=True)
+                    debug_file = os.path.join(debug_path, 'debug.jpg')
+                    cv2.imwrite(debug_file, debug_img)
 
             # Stream raw frame and metadata
             raw_streamer.push(frame.tobytes())
@@ -159,14 +174,23 @@ def main():
         pass
     finally:
         # DEBUG: print mean time and standard deviation for cap.read and yolo inference, in different run sizes
+        #        the printing happens only if enough runs were performed
         if DEBUG:
-            capread_times.pop(0)    #discard first time measured
-            YOLOinfer_times.pop(0)    #discard first time measured
-            for run in runs:
-                print("[ RUNS:",run,"]\nMean time cap.read(): ", statistics.mean(capread_times[:run]),"s")
-                print("[ RUNS:",run,"]\nStandard deviation for cap.read(): ", statistics.stdev(capread_times[:run]))
-                print("[ RUNS:",run,"]\nMean time YOLO inference: ", statistics.mean(YOLOinfer_times[:run]),"s")
-                print("[ RUNS:",run,"]\nStandard deviation for YOLO inference: ", statistics.stdev(YOLOinfer_times[:run]))
+            print("frame: ",frameSz,"bytes -->",frameSz/1024,"KB (stays constant)")
+            print("detections list overhead size: ",detectionsSz,"bytes -->",detectionsSz/1024,"KB")
+            print("detections float size: ",det_float_size,"bytes -->",det_float_size/1024,"KB")
+            print("detections int list overhead size: ",det_bbox_size,"bytes -->",det_bbox_size/1024,"KB")
+            print("detections int size: ",det_int_size,"bytes -->",det_int_size/1024,"KB")
+            print("total size: ", detectionsSz + det_float_size + det_bbox_size + det_int_size*4," Bytes")
+            print("total size: ", detectionsSz, "+ n_bbox*(",det_float_size + det_bbox_size + det_int_size*4,") Bytes")
+            if show_results:
+                capread_times.pop(0)    #discard first time measured
+                YOLOinfer_times.pop(0)    #discard first time measured
+                for run in runs:
+                    print("[ RUNS:",run,"]Mean time cap.read(): ", statistics.mean(capread_times[:run]),"s")
+                    print("[ RUNS:",run,"]Standard deviation for cap.read(): ", statistics.stdev(capread_times[:run]))
+                    print("[ RUNS:",run,"]Mean time YOLO inference: ", statistics.mean(YOLOinfer_times[:run]),"s")
+                    print("[ RUNS:",run,"]Standard deviation for YOLO inference: ", statistics.stdev(YOLOinfer_times[:run]))
         cap.release()
         raw_streamer.stop()
         meta_streamer.stop()
