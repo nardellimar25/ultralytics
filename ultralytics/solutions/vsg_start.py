@@ -73,6 +73,12 @@ def main():
     infer = YoloInference(MODEL_PATH, IMG_SZ, CONF_THRESHOLD)
     print("MODEL PATH: ",MODEL_PATH,"")
     print("IMG_SZ: ",IMG_SZ)
+	
+    # Check YOLO DRAM space consumption
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    
+
 
     # Define GStreamer caps and sink for raw video frames
     raw_caps = (
@@ -137,6 +143,7 @@ def main():
             if DEBUG:
                 count += 1
                 if(count < runs[-1]):
+                    frameSz = sys.getsizeof(frame)
                     capread_times.append(capread_time)
                     YOLOinfer_times.append(YOLOinfer_time)
                 else:
@@ -144,13 +151,11 @@ def main():
                     show_results = True
 
                 if detections:
-                    # DRAM memory occupance
-                    if count == 1:
-                        frameSz = sys.getsizeof(frame)
-                        detectionsSz = sys.getsizeof(detections)         
-                        det_float_size = sys.getsizeof(detections[0][0])
-                        det_bbox_size = sys.getsizeof(detections[0][1])
-                        det_int_size = sys.getsizeof(detections[0][1][0])
+                    # DRAM detections memory occupance
+                    detectionsSz = sys.getsizeof(detections)         
+                    det_float_size = sys.getsizeof(detections[0][0])
+                    det_bbox_size = sys.getsizeof(detections[0][1])
+                    det_int_size = sys.getsizeof(detections[0][1][0])
                         
                     debug_img = frame.copy()
                     for score, (x1, y1, x2, y2) in detections:
@@ -173,16 +178,19 @@ def main():
         # Exit cleanly on Ctrl+C
         pass
     finally:
-        # DEBUG: print mean time and standard deviation for cap.read and yolo inference, in different run sizes
-        #        the printing happens only if enough runs were performed
+        # DEBUG: print various timers and memory consumption
         if DEBUG:
-            print("frame: ",frameSz,"bytes -->",frameSz/1024,"KB (stays constant)")
-            print("detections list overhead size: ",detectionsSz,"bytes -->",detectionsSz/1024,"KB")
-            print("detections float size: ",det_float_size,"bytes -->",det_float_size/1024,"KB")
-            print("detections int list overhead size: ",det_bbox_size,"bytes -->",det_bbox_size/1024,"KB")
-            print("detections int size: ",det_int_size,"bytes -->",det_int_size/1024,"KB")
-            print("total size: ", detectionsSz + det_float_size + det_bbox_size + det_int_size*4," Bytes")
-            print("total size: ", detectionsSz, "+ n_bbox*(",det_float_size + det_bbox_size + det_int_size*4,") Bytes")
+            print("DRAM used after YOLO model loaded:")
+            print("RSS: {:.2f} MB".format(mem_info.rss / (1024*1024))) 
+            print("VMS: {:.2f} MB".format(mem_info.vms / (1024*1024)))
+            print("frame: ",frameSz,"bytes --> {:.2f} KB".format(frameSz/1024))
+            if detections:
+                print("detections list overhead size: ",detectionsSz,"bytes --> {:.2f} KB".format(detectionsSz/1024))
+                print("detections float size: ",det_float_size,"bytes --> {:.2f} KB".format(det_float_size/1024))
+                print("detections int list overhead size: ",det_bbox_size,"bytes --> {:.2f} KB".format(det_bbox_size/1024))
+                print("detections int size: ",det_int_size,"bytes --> {:.2f} KB".format(det_int_size/1024))
+                print("total size: ", detectionsSz + det_float_size + det_bbox_size + det_int_size*4,"Bytes")
+                print("total size: ", detectionsSz, "+ n_bbox * (",det_float_size + det_bbox_size + det_int_size*4,") Bytes")
             if show_results:
                 capread_times.pop(0)    #discard first time measured
                 YOLOinfer_times.pop(0)    #discard first time measured
