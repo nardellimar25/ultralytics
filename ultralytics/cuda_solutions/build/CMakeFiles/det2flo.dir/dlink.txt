@@ -1,0 +1,1 @@
+/usr/local/cuda-12.3/bin/nvcc -forward-unknown-to-host-compiler --allow-unsupported-compiler --allow-unsupported-compiler --compiler-options -Wall -arch=all -Xcompiler=-fPIC -Wno-deprecated-gpu-targets -shared -dlink --options-file CMakeFiles/det2flo.dir/deviceObjects1.rsp -o CMakeFiles/det2flo.dir/cmake_device_link.o --options-file CMakeFiles/det2flo.dir/deviceLinkLibs.rsp
