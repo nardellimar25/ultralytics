@@ -11,136 +11,18 @@
 #include <NvInfer.h>
 #include <opencv2/opencv.hpp>
 
-
+#include "yolodetect.h"
 
 using namespace nvinfer1;
 
-class Logger : public ILogger {
-    void log(Severity severity, const char* msg) noexcept override {
-        if (severity <= Severity::kWARNING) std::cout << msg << std::endl;
-    }
-} gLogger;
-
-// Structure to store detection
-struct Detection {
-    cv::Rect box;
-    float score;
-    int class_id;
-};
-
-float sigmoid(float x) {
-    return 1.f / (1.f + expf(-x));
-}
-
-float iou(const cv::Rect& a, const cv::Rect& b) {
-    int inter = (a & b).area();
-    int uni = a.area() + b.area() - inter;
-    return uni > 0 ? static_cast<float>(inter) / uni : 0.f;
-}
-
-// Read engine
-ICudaEngine* loadEngine(const std::string& engineFile, IRuntime*& runtime) {
-    std::ifstream file(engineFile, std::ios::binary);
-    if (!file) throw std::runtime_error("Failed to open engine file");
-    file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
-    file.seekg(0);
-    std::vector<char> buffer(size);
-    file.read(buffer.data(), size);
-    runtime = createInferRuntime(gLogger);
-    return runtime->deserializeCudaEngine(buffer.data(), size);
-}
-
-// Preprocess image to CHW normalized
-void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, const int img_width = 640, const int img_height = 640) {
-    cv::Mat resized, rgb;
-    cv::resize(img, resized, cv::Size(img_width, img_height));
-    cv::cvtColor(resized, rgb, cv::COLOR_BGR2RGB);
-    std::vector<float> chw(3 * img_width * img_height);
-    for (int c = 0; c < 3; ++c)
-        for (int y = 0; y < img_height; ++y)
-            for (int x = 0; x < img_width; ++x)
-                chw[c * img_height * img_width + y * img_width + x] = rgb.at<cv::Vec3b>(y, x)[c] / 255.0f;
-    cudaMemcpyAsync(gpuInput, chw.data(), chw.size() * sizeof(float), cudaMemcpyHostToDevice, stream);
-    //rgb.convertTo(rgb, CV_32FC3, 1.0f / 255.0f); // normalization
-    //cudaMemcpyAsync(gpuInput, rgb.data, rgb.total() * rgb.channels() * sizeof(float), cudaMemcpyHostToDevice, stream);
-}
-
-// Postprocess raw output from YOLOv8 nms=False
-std::vector<Detection> postprocessYoloOutput_nmsFalse(
-    const float* output, int num_anchors, int num_classes,
-    float conf_thresh = 0.4f, float iou_thresh = 0.45f)      //0.5 e 0.45
-{
-    std::vector<Detection> detections;
-
-    for (int i = 0; i < num_anchors; ++i) {
-        float cx = output[0 * num_anchors + i];
-        float cy = output[1 * num_anchors + i];
-        float w  = output[2 * num_anchors + i];
-        float h  = output[3 * num_anchors + i];
-
-        int best_class = -1;
-        float best_score = 0.f;
-        for (int c = 0; c < num_classes; ++c) {
-            float cls_score = output[(4 + c) * num_anchors + i];
-            if (cls_score > best_score) {
-                best_score = cls_score;
-                best_class = c;
-            }
-        }
-
-        /*if(i < 10){
-        printf("Anchor %d: cx=%.2f, cy=%.2f, w=%.2f, h=%.2f, score=%.8f, class=%d\n",
-               i, cx, cy, w, h, best_score, best_class);
-        }*/
-
-        if (best_score < conf_thresh) continue;
-        if (best_class != 0) continue;
-
-        
-        int x1 = static_cast<int>(cx - w / 2);
-        int y1 = static_cast<int>(cy - h / 2);
-        int x2 = static_cast<int>(cx + w / 2);
-        int y2 = static_cast<int>(cy + h / 2);
-
-        detections.push_back({cv::Rect(cv::Point(x1, y1), cv::Point(x2, y2)), best_score, best_class});
-
-    }
-
-    // Apply NMS
-    std::sort(detections.begin(), detections.end(), [](auto& a, auto& b) {
-        return a.score > b.score;
-    });
-
-    std::vector<Detection> final_dets;
-    std::vector<bool> suppressed(detections.size(), false);
-    for (size_t i = 0; i < detections.size(); ++i) {
-        if (suppressed[i]) continue;
-        final_dets.push_back(detections[i]);
-        for (size_t j = i + 1; j < detections.size(); ++j) {
-            if (iou(detections[i].box, detections[j].box) > iou_thresh)
-                suppressed[j] = true;
-        }
-    }
-
-    return final_dets;
-}
-
-
-int conf_slider = 45; // maps to 0.25
-int iou_slider = 45;  // maps to 0.45
-float conf_thresh = 0.45f;
-float iou_thresh = 0.45f;
-
-void on_trackbar(int, void*) {
-    conf_thresh = conf_slider / 100.0f;
-    iou_thresh = iou_slider / 100.0f;
-}
-
 
 int main() {
-    std::string engineFile = "./yoloengines/yolov8s_256_dockerborn.engine";
+    std::string engineFile = ENGINE_PATH;
 
+    if (engineFile.empty()) {
+        std::cerr << "Engine file path is empty. Please set ENGINE_PATH.\n";
+        return -1;
+    }
     const int img_width = 256;
     const int img_height = 256;
     const int num_classes = 80;
