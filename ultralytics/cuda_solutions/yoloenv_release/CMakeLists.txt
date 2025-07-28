@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.18)
+project(YOLODetectCUDA LANGUAGES C CXX CUDA)
+
+# Allow unsupported host compiler
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+
+# Set CUDA 12 compatibility
+enable_language(CUDA)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CUDA_STANDARD 14)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
+
+
+# Allow passing ENGINE_PATH from command line, or fallback to default
+if(NOT DEFINED ENGINE_PATH)
+    set(ENGINE_PATH "../../yoloengines/yolov8s_256_dockerborn.engine")
+endif()
+
+
+
+# Find OpenCV
+find_package(OpenCV REQUIRED)
+
+# TensorRT include and libs path
+include_directories(/usr/include/x86_64-linux-gnu)
+include_directories(/usr/local/cuda/include)
+link_directories(/usr/lib/x86_64-linux-gnu)
+
+# Your sources
+set(SOURCES
+    detections.cu
+    yolodetect.cpp
+    postProcess.cu
+)
+
+# Create executable
+add_executable(yolodetector ${SOURCES})
+
+target_compile_definitions(yolodetector PRIVATE ENGINE_PATH="${ENGINE_PATH}")
+
+
+# Link libs
+target_link_libraries(yolodetector
+    ${OpenCV_LIBS}
+    nvinfer
+    nvinfer_plugin
+    cudart
+)
+
+# Use host g++ for C++ compilation
+set_target_properties(yolodetector PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_ARCHITECTURES "all"
+    CUDA_STANDARD 14
+)
+
+
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options -Wall")
