@@ -16,7 +16,7 @@ set(CMAKE_CUDA_EXTENSIONS OFF)
 
 # Allow passing ENGINE_PATH from command line, or fallback to default
 if(NOT DEFINED ENGINE_PATH)
-    set(ENGINE_PATH "../../yoloengines/yolov8s_256_dockerborn.engine")
+    set(ENGINE_PATH "engine/yolov8s_256_dockerborn.engine")
 endif()
 
 
@@ -27,6 +27,7 @@ find_package(OpenCV REQUIRED)
 # TensorRT include and libs path
 include_directories(/usr/include/x86_64-linux-gnu)
 include_directories(/usr/local/cuda/include)
+include_directories(/usr/local/cuda-12.3/targets/x86_64-linux/include)
 link_directories(/usr/lib/x86_64-linux-gnu)
 
 # Your sources

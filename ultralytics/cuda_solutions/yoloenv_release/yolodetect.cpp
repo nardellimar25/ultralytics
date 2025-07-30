@@ -14,10 +14,6 @@ void Logger::log(Severity severity, const char* msg) noexcept {
     if (severity <= Severity::kWARNING) std::cout << msg << std::endl;
 }
 
-float sigmoid(float x) {
-    return 1.f / (1.f + expf(-x));
-}
-
 /*float iou(const cv::Rect& a, const cv::Rect& b) {
     int inter = (a & b).area();
     int uni = a.area() + b.area() - inter;
@@ -36,6 +32,8 @@ ICudaEngine* loadEngine(const std::string& engineFile, IRuntime*& runtime) {
     return runtime->deserializeCudaEngine(buffer.data(), size);
 }
 
+/*
+
 void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, const int img_width, const int img_height) {
     cv::Mat resized, rgb;
     cv::resize(img, resized, cv::Size(img_width, img_height));
@@ -48,7 +46,7 @@ void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, c
     cudaMemcpyAsync(gpuInput, chw.data(), chw.size() * sizeof(float), cudaMemcpyHostToDevice, stream);
 }
 
-/*std::vector<Detection> postprocessYoloOutput_nmsFalse(const float* output, int num_anchors, int num_classes, float conf_thresh, float iou_thresh) {
+std::vector<Detection> postprocessYoloOutput_nmsFalse(const float* output, int num_anchors, int num_classes, float conf_thresh, float iou_thresh) {
     std::vector<Detection> detections;
 
     for (int i = 0; i < num_anchors; ++i) {
@@ -93,7 +91,9 @@ void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, c
     }
 
     return final_dets;
-}*/
+}
+
+*/
 
 void on_trackbar(int, void*) {
     conf_thresh = conf_slider / 100.0f;

@@ -12,7 +12,7 @@
 
 using namespace nvinfer1;
 
-// Globals
+// Globals (declared as extern)
 extern int conf_slider;
 extern int iou_slider;
 extern float conf_thresh;
@@ -25,20 +25,20 @@ public:
 
 extern Logger gLogger;
 
-/*struct Detection {
+struct Detection {
     cv::Rect box;
     float score;
     int class_id;
-;
-*/
+};
 
-//float iou(const cv::Rect& a, const cv::Rect& b);
+float sigmoid(float x);
+float iou(const cv::Rect& a, const cv::Rect& b);
 
 ICudaEngine* loadEngine(const std::string& engineFile, IRuntime*& runtime);
 
-//void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, const int img_width, const int img_height);
+void preprocessImage(const cv::Mat& img, float* gpuInput, cudaStream_t stream, const int img_width, const int img_height);
 
-//std::vector<Detection> postprocessYoloOutput_nmsFalse(const float* output, int num_anchors, int num_classes, float conf_thresh, float iou_thresh);
+std::vector<Detection> postprocessYoloOutput_nmsFalse(const float* output, int num_anchors, int num_classes, float conf_thresh, float iou_thresh);
 
 void on_trackbar(int, void*);
 

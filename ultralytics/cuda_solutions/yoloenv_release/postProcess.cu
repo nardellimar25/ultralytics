@@ -9,12 +9,12 @@
 #include <thrust/copy.h>
 #include <thrust/execution_policy.h>
 
-#include "postProcess.cuh"
 
+#include "postProcess.cuh"
 
 // Function to calculate Intersection over Union (IoU)
 __device__ float iou(const Detection& a, const Detection& b) {
-    // Calculate the bboxes area
+
     float areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
     float areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
 
@@ -30,16 +30,34 @@ __device__ float iou(const Detection& a, const Detection& b) {
     return interArea / (areaA + areaB - interArea + 1e-6f);
 }
 
+// Kernel to preprocess the input image
+// Converts HWC/BGR image to CHW/float and normalizes it
+__global__ void preprocess_kernel(const uchar* input_bgr, float* d_input, int img_width, int img_height) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= img_width || y >= img_height) return;
+
+    int src_idx = (y * img_width + x) * 3;
+    uchar b = input_bgr[src_idx + 0];
+    uchar g = input_bgr[src_idx + 1];
+    uchar r = input_bgr[src_idx + 2];
+
+    int dst_idx = y * img_width + x;
+
+    d_input[0 * img_width * img_height + dst_idx] = r / 255.0f;
+    d_input[1 * img_width * img_height + dst_idx] = g / 255.0f;
+    d_input[2 * img_width * img_height + dst_idx] = b / 255.0f;
+
+}
+
 // Kernel to extract detections from the output tensor
 // Loops through each anchor and checks if the score exceeds the confidence threshold
 // it calculates the bounding box coordinates and stores the detection
 __global__ void extract_detections_kernel(const float* output, int num_anchors, float conf_thresh, Detection* dets, int* mask) {
 
-
     // Shared memory
-    //__shared__ Detection shared_dets[256];  // same as threads per block
-    //__shared__ int shared_count;  // shared count for number of detections found
-    __shared__ int shared_mask[256];  // mask for detections found, same
+    extern __shared__ int shared_mask[];
 
     int i = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -69,8 +87,12 @@ __global__ void extract_detections_kernel(const float* output, int num_anchors, 
     __syncthreads();
 
     if(threadIdx.x == 0) {
-        for (int i = 0; i < 256; i++){
-            mask[i+blockDim.x*blockIdx.x] = shared_mask[i];
+        for (int j = 0; j < blockDim.x; j++){
+            int idx = blockIdx.x * blockDim.x + j;
+
+            if (idx >= num_anchors) break;
+           
+            mask[idx] = shared_mask[j];  // Copy the mask to global memory
         }
     }
 
@@ -97,24 +119,44 @@ __global__ void nms_kernel_final_output(const Detection* dets_in, int num_in, fl
     }
 
     if (keep) {
-        int idx = atomicAdd(final_count, 1);
+        int idx = atomicAdd(final_count, 1);       //works fine bc we dont have many detections
         dets_out[idx] = dets_in[i];
     }
 }
 
 
-// === Host function ===
+// === Host functions ===
+
+// This function runs the pre-processing on the GPU
+void run_preprocess_gpu(const cv::Mat& resized_frame, float* d_input, int img_width, int img_height, cudaStream_t stream) {
+
+    uchar* d_bgr = nullptr;
+    size_t input_size = resized_frame.rows * resized_frame.cols * 3;
+    cudaMalloc(&d_bgr, input_size);
+
+    // Copy the resized frame to GPU
+    cudaMemcpyAsync(d_bgr, resized_frame.data, input_size, cudaMemcpyHostToDevice, stream);
+
+    dim3 block(16, 16);
+    dim3 grid((img_width + 15) / 16, (img_height + 15) / 16);
+
+    // Preprocess kernel 
+    preprocess_kernel<<<grid, block, 0, stream>>>(d_bgr, d_input, img_width, img_height);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        std::cerr << "preprocess_kernel failed: " << cudaGetErrorString(err) << std::endl;
+    }
+
+
+    cudaFree(d_bgr);
+
+}
+
 // This function runs the post-processing on the GPU
 // It extracts detections, applies NMS, and returns the final detections
 int run_postprocess_gpu(const float* d_output, int num_anchors, float conf_thresh,
-                        float iou_thresh, int max_dets, Detection* d_final)
+                        float iou_thresh, int max_dets, Detection* d_final, cudaStream_t stream)
 {
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
-    cudaEventRecord(start);
-
 
     // d_dets for intermediate detections
     Detection *d_dets, *d_compacted;    
@@ -122,110 +164,82 @@ int run_postprocess_gpu(const float* d_output, int num_anchors, float conf_thres
     // d_count_in for intermediate count, d_count_final for final count
     int *d_count_final, *d_mask;
     
-   
-
     // Allocate memory on the device
-    //float timeStart = static_cast<float>(clock());
     cudaMalloc(&d_dets, num_anchors * sizeof(Detection));
     cudaMalloc(&d_count_final, sizeof(int));
     cudaMalloc(&d_mask, num_anchors * sizeof(int));
     cudaMalloc(&d_compacted, num_anchors * sizeof(Detection));
     cudaMemset(d_count_final, 0, sizeof(int));
-    //float timeEnd = static_cast<float>(clock());
-    //std::cout << "-Memory allocation: " << (timeEnd - timeStart) / CLOCKS_PER_SEC * 1000 << " ms\n";
+
 
     dim3 threads(256);
     dim3 blocks((num_anchors + threads.x - 1) / threads.x);
-    //size_t shared_mem_size = threads.x * sizeof(Detection);
+    size_t shared_mem_size = threads.x * sizeof(int);
 
     // Filtering kernel
-    
-    extract_detections_kernel<<<blocks, threads>>>(d_output, num_anchors, conf_thresh, d_dets, d_mask);
+    extract_detections_kernel<<<blocks, threads, shared_mem_size, stream>>>(d_output, num_anchors, conf_thresh, d_dets, d_mask);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         std::cerr << "extract_detections_kernel failed: " << cudaGetErrorString(err) << std::endl;
     }
-    //float milliseconds = 0;
 
-    //std::cout << " extract det kernel: " << milliseconds << " ms" << std::endl;
 
     thrust::device_ptr<Detection> det_ptr(d_dets);
     thrust::device_ptr<int> mask_ptr(d_mask);
     auto compacted_ptr = thrust::device_pointer_cast(d_compacted);
 
-    // Perform filtering (GPU-side compaction)
-    //timeStart = static_cast<float>(clock());
+    // Compact the performed filtering (GPU)
     auto end = thrust::copy_if(
         thrust::device,
         det_ptr, det_ptr + num_anchors,                 // input range
         mask_ptr,                                       // filter based on this
-        compacted_ptr,       // output destination
+        compacted_ptr,                                  // output destination
         thrust::identity<int>()                         // copy where mask == 1
     );
-    //timeEnd = static_cast<float>(clock());
-    //std::cout << " thrust compaction: " << (timeEnd - timeStart) / CLOCKS_PER_SEC * 1000 << " ms\n";
 
     // Return to host number of detections found
     int num_dets = end - compacted_ptr;
 
-    //std::cout << " Valid dets: " << num_dets << std::endl;
-
 /*
     // Return to host number of detections found
     int num_dets = 0;
-    timeStart = static_cast<float>(clock());
+
     cudaMemcpy(&num_dets, d_count_in, sizeof(int), cudaMemcpyDeviceToHost);
-    timeEnd = static_cast<float>(clock());
-    std::cout << " Count extraction memcpy time: " << (timeEnd - timeStart) / CLOCKS_PER_SEC * 1000 << " ms\n";
-*/
+
+
     // If no detections early exit
-    /*if (num_dets == 0) {
+    if (num_dets == 0) {
         cudaFree(d_dets); 
         cudaFree(d_count_in); 
         cudaFree(d_count_final);
         return 0;
-    }*/
+    }
+
+*/
 
     dim3 blocks_nms((num_dets + threads.x - 1) / threads.x);
 
     // NMS kernel
-    //cudaEventRecord(start);
-    nms_kernel_final_output<<<blocks_nms, threads>>>(d_compacted, num_dets, iou_thresh, d_final, d_count_final);
+    nms_kernel_final_output<<<blocks_nms, threads, 0, stream>>>(d_compacted, num_dets, iou_thresh, d_final, d_count_final);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
-        std::cerr << "extract_detections_kernel failed: " << cudaGetErrorString(err) << std::endl;
+        std::cerr << "nms_kernel_final_output failed: " << cudaGetErrorString(err) << std::endl;
     }
-    //cudaEventRecord(stop);
-    //cudaEventSynchronize(stop);
-    //cudaEventElapsedTime(&milliseconds, start, stop);
-    //std::cout << " NMS kernel: " << milliseconds << " ms" << std::endl;
-
 
     // Return to host number of final detections
     int det_count_final = 0;
 
-    //timeStart = static_cast<float>(clock());
     cudaMemcpy(&det_count_final, d_count_final, sizeof(int), cudaMemcpyDeviceToHost);
-    //timeEnd = static_cast<float>(clock());
-    //std::cout << " Final extraction memcpy: " << (timeEnd - timeStart) / CLOCKS_PER_SEC * 1000 << " ms\n";
 
-    //timeStart = static_cast<float>(clock());
+
     cudaFree(d_dets);
     cudaFree(d_mask);
     cudaFree(d_compacted);
     cudaFree(d_count_final);
-    //timeEnd = static_cast<float>(clock());
-    //std::cout << " Memory deallocation: " << (timeEnd - timeStart) / CLOCKS_PER_SEC * 1000 << " ms\n";
-    float milliseconds = 0;
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    std::cout << " (inside) postproc time : " << milliseconds << " ms" << std::endl;
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
 
     return det_count_final;
+
 }
 
