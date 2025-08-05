@@ -125,14 +125,14 @@ __global__ void nms_kernel_final_output(const Detection* dets_in, int num_in, fl
 }
 
 
+
+
+
 // === Host functions ===
 
 // This function runs the pre-processing on the GPU
-void run_preprocess_gpu(const cv::Mat& resized_frame, float* d_input, int img_width, int img_height, cudaStream_t stream) {
-
-    uchar* d_bgr = nullptr;
-    size_t input_size = resized_frame.rows * resized_frame.cols * 3;
-    cudaMalloc(&d_bgr, input_size);
+// It converts the input image from BGR to float and normalizes it
+void run_preprocess_gpu(const cv::Mat& resized_frame, float* d_input, int img_width, int img_height, size_t input_size, uchar* d_bgr, cudaStream_t stream) {
 
     // Copy the resized frame to GPU
     cudaMemcpyAsync(d_bgr, resized_frame.data, input_size, cudaMemcpyHostToDevice, stream);
@@ -148,29 +148,16 @@ void run_preprocess_gpu(const cv::Mat& resized_frame, float* d_input, int img_wi
     }
 
 
-    cudaFree(d_bgr);
-
 }
 
 // This function runs the post-processing on the GPU
 // It extracts detections, applies NMS, and returns the final detections
 int run_postprocess_gpu(const float* d_output, int num_anchors, float conf_thresh,
-                        float iou_thresh, int max_dets, Detection* d_final, cudaStream_t stream)
+                        float iou_thresh, int max_dets, Detection* d_final, cudaStream_t stream,
+                        Detection *d_dets, Detection *d_compacted, int *d_mask, int *d_count_final)
 {
 
-    // d_dets for intermediate detections
-    Detection *d_dets, *d_compacted;    
-
-    // d_count_in for intermediate count, d_count_final for final count
-    int *d_count_final, *d_mask;
-    
-    // Allocate memory on the device
-    cudaMalloc(&d_dets, num_anchors * sizeof(Detection));
-    cudaMalloc(&d_count_final, sizeof(int));
-    cudaMalloc(&d_mask, num_anchors * sizeof(int));
-    cudaMalloc(&d_compacted, num_anchors * sizeof(Detection));
     cudaMemset(d_count_final, 0, sizeof(int));
-
 
     dim3 threads(256);
     dim3 blocks((num_anchors + threads.x - 1) / threads.x);
@@ -197,25 +184,16 @@ int run_postprocess_gpu(const float* d_output, int num_anchors, float conf_thres
         thrust::identity<int>()                         // copy where mask == 1
     );
 
-    // Return to host number of detections found
+    // Check number of detections found
     int num_dets = end - compacted_ptr;
-
-/*
-    // Return to host number of detections found
-    int num_dets = 0;
-
-    cudaMemcpy(&num_dets, d_count_in, sizeof(int), cudaMemcpyDeviceToHost);
-
+    //std::cout << "Number of detections after filtering: " << num_dets << std::endl;
 
     // If no detections early exit
     if (num_dets == 0) {
-        cudaFree(d_dets); 
-        cudaFree(d_count_in); 
-        cudaFree(d_count_final);
-        return 0;
-    }
 
-*/
+        return 0;
+
+    }
 
     dim3 blocks_nms((num_dets + threads.x - 1) / threads.x);
 
@@ -230,14 +208,6 @@ int run_postprocess_gpu(const float* d_output, int num_anchors, float conf_thres
     int det_count_final = 0;
 
     cudaMemcpy(&det_count_final, d_count_final, sizeof(int), cudaMemcpyDeviceToHost);
-
-
-    cudaFree(d_dets);
-    cudaFree(d_mask);
-    cudaFree(d_compacted);
-    cudaFree(d_count_final);
-
-
 
     return det_count_final;
 

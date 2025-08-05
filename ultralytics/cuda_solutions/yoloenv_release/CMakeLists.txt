@@ -16,7 +16,7 @@ set(CMAKE_CUDA_EXTENSIONS OFF)
 
 # Allow passing ENGINE_PATH from command line, or fallback to default
 if(NOT DEFINED ENGINE_PATH)
-    set(ENGINE_PATH "engine/yolov8s_256_dockerborn.engine")
+    set(ENGINE_PATH "engine/yolo.engine")
 endif()
 
 

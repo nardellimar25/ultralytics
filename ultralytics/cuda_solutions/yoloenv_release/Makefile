@@ -9,10 +9,10 @@ ENGINE_DIR    := $(DEPLOY_DIR)/engine
 
 # Executable and engine paths
 TARGET_BIN    := yolodetector
-ENGINE_SRC    := ../yoloengines/yolov8s_256_dockerborn.engine
-ENGINE_TARGET := $(ENGINE_DIR)/yolov8s_256_dockerborn.engine
+ENGINE_SRC    := ../yoloengines/yolo.engine
+ENGINE_TARGET := $(ENGINE_DIR)/yolo.engine
 
-# CUDA path (adjust if needed)
+# CUDA path
 CUDA_LIB_DIR  := /usr/local/cuda-12.3/lib64
 
 # Default target
@@ -33,32 +33,63 @@ deploy: build
 	rm -rf $(DEPLOY_DIR)
 	mkdir -p $(BIN_DIR) $(LIB_DIR) $(ENGINE_DIR)
 
-	# Copy binary and engine
+# Copy binary and engine
 	cp $(BUILD_DIR)/$(TARGET_BIN) $(BIN_DIR)/
 	cp $(ENGINE_SRC) $(ENGINE_TARGET)
 
-	# === Option A: Manual explicit list ===
-	# Uncomment these if you prefer fixed control
-	# cp /usr/lib/x86_64-linux-gnu/libnvinfer.so.*        $(LIB_DIR)/
-	# cp /usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so.* $(LIB_DIR)/
-	# cp $(CUDA_LIB_DIR)/libcudart.so.*                   $(LIB_DIR)/
-	# cp /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2   $(LIB_DIR)/
-	# cp /usr/lib/x86_64-linux-gnu/libopencv_*.so.*       $(LIB_DIR)/ || true
-	# cp /usr/lib/x86_64-linux-gnu/libQt5*.so.*           $(LIB_DIR)/ || true
-
-	# === Option B: Auto-detect all linked libraries ===
+# === Auto-detect all linked libraries ===
 	ldd $(BIN_DIR)/$(TARGET_BIN) | awk '{print $$3}' | grep '^/' | xargs -I{} cp -v {} $(LIB_DIR) || true
 
-	# Copy dynamic linker (required!)
+# Copy dynamic linker (required!)
 	cp /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 $(LIB_DIR)/
 
-	# Create run.sh
+# Copy Qt platform plugin (libqxcb)
+	mkdir -p $(LIB_DIR)/qt/plugins/platforms
+	cp /usr/lib/x86_64-linux-gnu/qt5/plugins/platforms/libqxcb.so $(LIB_DIR)/qt/plugins/platforms/
+
+# Copy all required Qt shared libs for libqxcb
+	@for lib in \
+		libQt5XcbQpa.so.5 \
+		libQt5Gui.so.5 \
+		libQt5Core.so.5 \
+		libQt5DBus.so.5 \
+		libxcb-xinerama.so.0 \
+		libxcb-xinput.so.0 ; do \
+		path=$$(ldconfig -p | grep -w $$lib | head -n1 | awk '{print $$NF}'); \
+		if [ -n "$$path" ]; then \
+			cp -v "$$path" $(LIB_DIR)/; \
+		else \
+			echo "❌ Missing $$lib"; \
+		fi; \
+	done
+
+
+# Create run.sh
 	@echo '#!/bin/bash' > $(DEPLOY_DIR)/run.sh
 	@echo 'DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $(DEPLOY_DIR)/run.sh
+	@echo 'export QT_QPA_PLATFORM_PLUGIN_PATH=$$DIR/lib/qt/plugins/platforms' >> $(DEPLOY_DIR)/run.sh
 	@echo '$$DIR/lib/ld-linux-x86-64.so.2 --library-path $$DIR/lib $$DIR/bin/$(TARGET_BIN)' >> $(DEPLOY_DIR)/run.sh
 	chmod +x $(DEPLOY_DIR)/run.sh
 
-	@echo "✅ Deployment folder ready. Run: cd $(DEPLOY_DIR) && ./run.sh"
+
+# Create run_profile.sh with auto-detect for nsys
+	@echo '#!/bin/bash' > $(DEPLOY_DIR)/run_profile.sh
+	@echo 'DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'export QT_QPA_PLATFORM_PLUGIN_PATH=$$DIR/lib/qt/plugins/platforms' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'NSYS=$$(command -v nsys)' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'if [ -z "$$NSYS" ]; then' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo '  echo "❌ nsys not found in PATH. Please install or adjust manually."' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo '  exit 1' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'fi' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo '"$$NSYS" profile --output yolodetector_profile \\' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo '  --trace=cuda,nvtx,osrt --stop-on-exit true \\' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo '  $$DIR/lib/ld-linux-x86-64.so.2 --library-path $$DIR/lib $$DIR/bin/$(TARGET_BIN)' >> $(DEPLOY_DIR)/run_profile.sh
+	chmod +x $(DEPLOY_DIR)/run_profile.sh
+
+	@echo "✅ Deployment folder and profiler ready."
+	@echo " Run: cd $(DEPLOY_DIR) && ./run.sh "
+	@echo " Profile: cd $(DEPLOY_DIR) && ./run_profile.sh"
+
 
 # cleanup
 .PHONY: clean

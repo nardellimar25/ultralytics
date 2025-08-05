@@ -18,9 +18,9 @@ void run_preprocess_gpu(
     float* d_input,         // Device pointer to input
     int img_width,          // Width of the input image
     int img_height,         // Height of the input image
+    size_t input_size,      // Size of the input buffer in bytes
+    uchar* d_bgr,           // Device pointer to BGR data
     cudaStream_t stream     // CUDA stream for async execution
-    //uchar* d_bgr
-    //size_t input_size
 );
 
 // This is the post process function you call from your main.cu
@@ -31,17 +31,13 @@ int run_postprocess_gpu(
     float iou_thresh,           // IoU threshold for NMS
     int max_dets,               // Max buffer size for detections
     Detection* d_final,         // device output buffer
-    cudaStream_t stream        // CUDA stream for async execution
-    //Detection *d_dets,         // Intermediate detections buffer
-    //Detection *d_compacted,     // Compacted detections buffer
-    //int *d_mask,                // Mask for valid detections
-    //int *d_count_final          // Final count of detections
+    cudaStream_t stream,        // CUDA stream for async execution
+    Detection *d_dets,          // Intermediate detections buffer
+    Detection *d_compacted,     // Compacted detections buffer
+    int *d_mask,                // Mask for valid detections
+    int *d_count_final          // Final count of detections
 );
 
 
-// === Optional: you can move these into .cu instead ===
-// __global__ void extract_detections_kernel(...);
-// __global__ void nms_kernel_final_output(...);
-// __device__ float iou(const Detection& a, const Detection& b);
 
 #endif // POSTPROCESS_CUH
