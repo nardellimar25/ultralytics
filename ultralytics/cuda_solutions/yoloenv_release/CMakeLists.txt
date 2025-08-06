@@ -32,14 +32,17 @@ link_directories(/usr/lib/x86_64-linux-gnu)
 
 # Your sources
 set(SOURCES
+    cuda_kernels.cu
+    cuda_preprocess.cu
+    cuda_postprocess.cu
     detections.cu
     yolodetect.cpp
-    postProcess.cu
 )
 
 # Create executable
 add_executable(yolodetector ${SOURCES})
 
+# Engine path definition
 target_compile_definitions(yolodetector PRIVATE ENGINE_PATH="${ENGINE_PATH}")
 
 

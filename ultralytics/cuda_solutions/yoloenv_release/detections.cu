@@ -14,8 +14,12 @@
 #include <time.h>
 #include <thread>
 #include <chrono>
+#include <nvtx3/nvToolsExt.h>
 
-#include "postProcess.cuh"
+#include "cuda_preprocess.cuh"
+#include "cuda_postprocess.cuh"
+#include "cuda_kernels.cuh"
+#include "cuda_detection_struct.h"
 #include "yolodetect.h"
 
 using namespace nvinfer1;
@@ -24,6 +28,7 @@ using namespace nvinfer1;
 int main() {
 
     // Start the profiler to measure performance
+    nvtxMark("start");
     cudaProfilerStart();  
 
     //cudaEvent_t start, stop;
@@ -64,20 +69,19 @@ int main() {
 
 
     // Initialize based on engine dimensions
-    const int img_width = inputDims.d[3];
-    const int img_height = inputDims.d[2];
+    const int engine_img_width = inputDims.d[3];
+    const int engine_img_height = inputDims.d[2];
     const int num_classes = 80;
     const int num_anchors = outputDims.d[2];
     const int max_detections = 100;
-    const int inputSize = inputDims.d[0] * inputDims.d[1] * img_height * img_width;
+    const int inputSize = inputDims.d[0] * inputDims.d[1] * engine_img_height * engine_img_width;
     const int outputSize = outputDims.d[0] * (num_classes + 4) * num_anchors;
     // get needed resized frame dimensions
-    size_t input_size = img_height * img_width * 3;
+    size_t engine_input_size = engine_img_height * engine_img_width * 3;
     // Initialize number of detections
     int num_dets = 0;
 
-
-    // Initialize CUDA buffers
+    // Initialize engine buffers
     void* buffers[2];
     cudaMalloc(&buffers[inputIndex], inputSize * sizeof(float));
     cudaMalloc(&buffers[outputIndex], outputSize * sizeof(float));
@@ -95,11 +99,11 @@ int main() {
     // Initialize final detections results buffer
     Detection* d_final;
     cudaMalloc(&d_final, max_detections * sizeof(Detection));
-
-    // Initialize BGR image preprocessing buffer
-    uchar* d_bgr = nullptr;
-    cudaMalloc(&d_bgr, input_size);
     
+    // Initialize resized image preprocessing buffer
+    uchar* d_resized = nullptr;
+    cudaMalloc(&d_resized, engine_input_size);
+
     // Initialize final count buffer
     int *d_count_final;
     cudaMalloc(&d_count_final, sizeof(int));
@@ -132,7 +136,6 @@ int main() {
 
     // Create Mat to hold the frame data using pinned memory
     cv::Mat frame(cap_height, cap_width, CV_8UC3, pinned_frame_data);
-    cv::Mat resizedForModel;
     cap.read(frame);
     if (frame.empty()) {
         std::cerr << "Frame vuoto\n";
@@ -140,8 +143,12 @@ int main() {
     }
 
     // Calculate scale factors for bounding box coordinates
-    float scaleX = static_cast<float>(frame.cols) / img_width;
-    float scaleY = static_cast<float>(frame.rows) / img_height;
+    float scaleX = static_cast<float>(cap_width) / engine_img_width;
+    float scaleY = static_cast<float>(cap_height) / engine_img_height;
+
+    // Initialize BGR image preprocessing buffer
+    uchar* d_bgr = nullptr;
+    cudaMalloc(&d_bgr, pinned_size);
 
 
     // Create OpenCV windows and trackbars
@@ -150,23 +157,31 @@ int main() {
     cv::createTrackbar("IoU Threshold", "Detections with bbox", &iou_slider, 100, on_trackbar);
     on_trackbar(0, 0);
 
-
+    // Main loop to capture frames and run inference
     while (true) {
 
+        nvtxRangePush("frame capture");
         cap.read(frame);
         if (frame.empty()) {
             std::cerr << "Frame vuoto\n";
             break;
         }
-
+        nvtxRangePop();
         
         // Resize the frame to the model input size
-        cv::resize(frame, resizedForModel, cv::Size(img_width, img_height));
+        //cv::resize(frame, resizedForModel, cv::Size(img_width, img_height));
 
         // Event: preprocess
         //cudaEventRecord(start);
-        //preprocessImage(resizedForModel, (float*)buffers[inputIndex], stream1, img_width, img_height);
-        run_preprocess_gpu(resizedForModel, (float*)buffers[inputIndex], img_width, img_height, input_size, d_bgr, stream1);
+        nvtxRangePush("Preprocessing");
+
+        run_preprocess_gpu( 
+            (float*)buffers[inputIndex], pinned_frame_data, d_bgr, d_resized, 
+            engine_img_width, engine_img_height, cap_width, cap_height, 
+            scaleX, scaleY, pinned_size, stream1
+        );
+
+        nvtxRangePop();
         //cudaEventRecord(stop);
         //cudaEventSynchronize(stop);
         //cudaEventElapsedTime(&milliseconds, start, stop);
@@ -174,7 +189,9 @@ int main() {
         
         // Event: inference
         //cudaEventRecord(start);
+        nvtxRangePush("Inference");
         context->enqueueV2(buffers, stream1, nullptr);
+        nvtxRangePop();
         //cudaEventRecord(stop);
         //cudaEventSynchronize(stop);
         //cudaEventElapsedTime(&milliseconds, start, stop);
@@ -183,7 +200,9 @@ int main() {
 
         // Event: post-process
         //cudaEventRecord(start, stream1);
+        nvtxRangePush("Postprocessing");
         num_dets = run_postprocess_gpu(engine_output, num_anchors, conf_thresh, iou_thresh, max_detections, d_final, stream1, d_dets, d_compacted, d_mask, d_count_final);
+        nvtxRangePop();
         //cudaEventRecord(stop, stream1);
         //cudaEventSynchronize(stop);
         //cudaEventElapsedTime(&milliseconds, start, stop);
@@ -191,6 +210,7 @@ int main() {
 
 
         // Only do memory transfer if we have final detections
+        nvtxRangePush("debugging");
         if (num_dets > 0) {
 
             std::vector<Detection> detections(num_dets);
@@ -216,12 +236,15 @@ int main() {
 
         //uncomment to exit using ESC key instead of Ctrl+C
         if (cv::waitKey(1) == 27) break;
-
+        nvtxRangePop();
 
     }
-
+    
     // Ensure all operations are complete before cleanup
-    cudaDeviceSynchronize();  
+    cudaDeviceSynchronize();
+
+    // Mark the end of the profiling range
+    nvtxMark("stop");
 
     // Ensure profiler is stopped
     cudaProfilerStop();
@@ -242,6 +265,7 @@ int main() {
     context->destroy();
     engine->destroy();
     runtime->destroy();
+
 
     return 0;
 }

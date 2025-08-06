@@ -72,19 +72,21 @@ deploy: build
 	chmod +x $(DEPLOY_DIR)/run.sh
 
 
-# Create run_profile.sh with auto-detect for nsys
+# Create run_profile.sh with advanced CPU tracing for nsys
 	@echo '#!/bin/bash' > $(DEPLOY_DIR)/run_profile.sh
 	@echo 'DIR="$$(cd "$$(dirname "$$0")" && pwd)"' >> $(DEPLOY_DIR)/run_profile.sh
-	@echo 'export QT_QPA_PLATFORM_PLUGIN_PATH=$$DIR/lib/qt/plugins/platforms' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'export QT_QPA_PLATFORM_PLUGIN_PATH="$$DIR/lib/qt/plugins/platforms"' >> $(DEPLOY_DIR)/run_profile.sh
 	@echo 'NSYS=$$(command -v nsys)' >> $(DEPLOY_DIR)/run_profile.sh
-	@echo 'if [ -z "$$NSYS" ]; then' >> $(DEPLOY_DIR)/run_profile.sh
-	@echo '  echo "❌ nsys not found in PATH. Please install or adjust manually."' >> $(DEPLOY_DIR)/run_profile.sh
-	@echo '  exit 1' >> $(DEPLOY_DIR)/run_profile.sh
-	@echo 'fi' >> $(DEPLOY_DIR)/run_profile.sh
+	@echo 'if [ -z "$$NSYS" ]; then echo "❌ nsys not found"; exit 1; fi' >> $(DEPLOY_DIR)/run_profile.sh
 	@echo '"$$NSYS" profile --output yolodetector_profile \\' >> $(DEPLOY_DIR)/run_profile.sh
 	@echo '  --trace=cuda,nvtx,osrt --stop-on-exit true \\' >> $(DEPLOY_DIR)/run_profile.sh
 	@echo '  $$DIR/lib/ld-linux-x86-64.so.2 --library-path $$DIR/lib $$DIR/bin/$(TARGET_BIN)' >> $(DEPLOY_DIR)/run_profile.sh
-	chmod +x $(DEPLOY_DIR)/run_profile.sh
+	@chmod +x $(DEPLOY_DIR)/run_profile.sh
+
+
+#"$NSYS" profile --output yolodetector_profile \
+  --trace=cuda,nvtx,osrt --stop-on-exit true \
+  $DIR/lib/ld-linux-x86-64.so.2 --library-path $DIR/lib $DIR/bin/yolodetector
 
 	@echo "✅ Deployment folder and profiler ready."
 	@echo " Run: cd $(DEPLOY_DIR) && ./run.sh "
