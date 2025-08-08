@@ -1,6 +1,6 @@
 #include "cuda_kernels.cuh"
 
-// === Device utility functions ===
+// === Utility functions ===
 
 __device__ float iou(const Detection& a, const Detection& b) {
     float areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
@@ -119,6 +119,22 @@ __global__ void extract_detections_kernel(
             if (idx >= num_anchors) break;
             mask[idx] = shared_mask[j];
         }
+    }
+}
+
+__global__ void compact_detections_kernel(
+    const Detection* __restrict__ d_dets,
+    const int* __restrict__ d_mask,
+    Detection* __restrict__ d_compacted,
+    int* d_num_valid,
+    int num_anchors
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_anchors) return;
+
+    if (d_mask[idx]) {
+        int out_idx = atomicAdd(d_num_valid, 1);
+        d_compacted[out_idx] = d_dets[idx];
     }
 }
 

@@ -32,6 +32,14 @@ __global__ void extract_detections_kernel(
     int* mask
 );
 
+__global__ void compact_detections_kernel(
+    const Detection* __restrict__ d_dets,
+    const int* __restrict__ d_mask,
+    Detection* __restrict__ d_compacted,
+    int* d_num_valid,
+    int num_anchors
+);
+
 __global__ void nms_kernel_final_output(
     const Detection* dets_in,
     int num_in,
