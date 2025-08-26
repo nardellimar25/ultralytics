@@ -23,6 +23,7 @@ endif()
 
 # Find OpenCV
 find_package(OpenCV REQUIRED)
+find_package(Threads REQUIRED)
 
 # TensorRT include and libs path
 include_directories(/usr/include/x86_64-linux-gnu)
@@ -35,8 +36,11 @@ set(SOURCES
     cuda_kernels.cu
     cuda_preprocess.cu
     cuda_postprocess.cu
-    detections.cu
+    cuda_threads.cu
+    threaded_detections_main.cu
     yolodetect.cpp
+    v4l2_mmap_camera.cpp
+
 )
 
 # Create executable
@@ -52,6 +56,7 @@ target_link_libraries(yolodetector
     nvinfer
     nvinfer_plugin
     cudart
+    Threads::Threads
 )
 
 # Use host g++ for C++ compilation
