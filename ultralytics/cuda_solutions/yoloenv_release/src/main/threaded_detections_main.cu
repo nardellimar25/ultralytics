@@ -71,12 +71,12 @@ int main() {
     std::cout << "->yolo engine loaded successfully\n";
 
     IExecutionContext* context = engine->createExecutionContext();
-    const int inputIndex = engine->getBindingIndex("images");
-    const int outputIndex = engine->getBindingIndex("output0");
+    const int inputIndex = engine->getBindingIndex("yolo_input");
+    const int outputIndex = engine->getBindingIndex("yolo_output");
     nvinfer1::Dims inputDims = engine->getBindingDimensions(inputIndex);
     nvinfer1::Dims outputDims = engine->getBindingDimensions(outputIndex);
-    auto inType  = engine->getTensorDataType("images");
-    auto outType = engine->getTensorDataType("output0");
+    auto inType  = engine->getTensorDataType("yolo_input");
+    auto outType = engine->getTensorDataType("yolo_output");
 
     // Print engine info for yolo
     std::cout << "\n[YOLO engine]\n";
