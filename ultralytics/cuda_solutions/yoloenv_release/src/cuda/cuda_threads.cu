@@ -26,17 +26,165 @@ cv::Mat frame_front;
 
 std::mutex frame_mutex;
 std::mutex frame_copy_mutex;
-// std::mutex detection_mutex;
 
 std::condition_variable frame_ready;
 std::atomic<bool> new_frame_available(false);
 std::atomic<bool> keep_running(true);
 
 
+// TEMP: global variables and kernels for NVMM EGL -> CUDA BGR copy
+// will be moved to kernel files later
+
+// TEMP: redefinition of checkCu
+static void checkCu(CUresult r, const char* msg)
+{
+    if (r != CUDA_SUCCESS)
+    {
+        const char* errStr = nullptr;
+        cuGetErrorString(r, &errStr);
+        std::cerr << "[CUDA-EGL] " << msg << " failed: "
+                  << (errStr ? errStr : "unknown") << " (" << r << ")\n";
+    }
+}
+
+// Very simple RGBA -> BGR copy (no resize yet, 1:1 copy)
+__global__ void rgba_to_bgr_linear_kernel(
+    const unsigned char* __restrict__ src,
+    int srcPitch,        // in bytes
+    int width,
+    int height,
+    unsigned char* __restrict__ dst   // tightly packed BGR
+)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+
+    const unsigned char* srcRow = src + y * srcPitch + 4 * x;
+    unsigned char r = srcRow[0];
+    unsigned char g = srcRow[1];
+    unsigned char b = srcRow[2];
+
+    int dstIdx = (y * width + x) * 3;
+    dst[dstIdx + 0] = b;
+    dst[dstIdx + 1] = g;
+    dst[dstIdx + 2] = r;
+}
+
+// Map NvBufSurface -> EGLImage -> CUDA and copy RGBA into d_bgr
+static bool upload_nvmm_rgba_to_d_bgr(
+    NvBufSurface* surf,
+    int           index,       // plane index (usually 0)
+    unsigned char* d_bgr,      // destination on device
+    int           width,
+    int           height,
+    cudaStream_t  stream
+)
+{
+    // Map for device access
+    if (NvBufSurfaceMap(surf, index, 0, NVBUF_MAP_READ) != 0)
+    {
+        std::cerr << "[CUDA-EGL] NvBufSurfaceMap failed\n";
+        return false;
+    }
+
+    if (NvBufSurfaceSyncForDevice(surf, index, 0) != 0)
+    {
+        std::cerr << "[CUDA-EGL] NvBufSurfaceSyncForDevice failed\n";
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    // Map to EGLImage
+    if (NvBufSurfaceMapEglImage(surf, index) != 0)
+    {
+        std::cerr << "[CUDA-EGL] NvBufSurfaceMapEglImage failed\n";
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    EGLImageKHR eglImage = surf->surfaceList[index].mappedAddr.eglImage;
+    if (!eglImage)
+    {
+        std::cerr << "[CUDA-EGL] eglImage is null\n";
+        NvBufSurfaceUnMapEglImage(surf, index);
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    CUgraphicsResource cuRes = nullptr;
+    CUeglFrame eglFrame;
+
+    CUresult r = cuGraphicsEGLRegisterImage(
+        &cuRes,
+        eglImage,
+        CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+    if (r != CUDA_SUCCESS)
+    {
+        checkCu(r, "cuGraphicsEGLRegisterImage");
+        NvBufSurfaceUnMapEglImage(surf, index);
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    r = cuGraphicsResourceGetMappedEglFrame(
+        &eglFrame,
+        cuRes,
+        0, 0);
+    if (r != CUDA_SUCCESS)
+    {
+        checkCu(r, "cuGraphicsResourceGetMappedEglFrame");
+        cuGraphicsUnregisterResource(cuRes);
+        NvBufSurfaceUnMapEglImage(surf, index);
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    if (eglFrame.frameType != CU_EGL_FRAME_TYPE_PITCH)
+    {
+        std::cerr << "[CUDA-EGL] Unexpected frameType (not PITCH)\n";
+        cuGraphicsUnregisterResource(cuRes);
+        NvBufSurfaceUnMapEglImage(surf, index);
+        NvBufSurfaceUnMap(surf, index, 0);
+        return false;
+    }
+
+    // unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.pPitch[0]);
+    unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.frame.pPitch[0]);
+    int srcPitch             = static_cast<int>(eglFrame.pitch);
+
+    dim3 block(16, 16);
+    dim3 grid(
+        (width  + block.x - 1) / block.x,
+        (height + block.y - 1) / block.y);
+
+    rgba_to_bgr_linear_kernel<<<grid, block, 0, stream>>>(
+        srcDevPtr,
+        srcPitch,
+        width,
+        height,
+        d_bgr);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        std::cerr << "[CUDA-EGL] rgba_to_bgr_linear_kernel error: "
+                  << cudaGetErrorString(err) << "\n";
+    }
+
+    cuGraphicsUnregisterResource(cuRes);
+    NvBufSurfaceUnMapEglImage(surf, index);
+    NvBufSurfaceUnMap(surf, index, 0);
+
+    return (err == cudaSuccess);
+}
+
+
+
 
 // ------------------------------ FRAME CAPTURE THREAD ------------------------------ //
-
-void frame_capture_thread(V4L2MMapCamera& cam) {
+/*
+void frame_capture_thread_v4l2(V4L2MMapCamera& cam) {
 
     nvtxRangePush("FrameCaptureThread_V4L2");
 
@@ -103,6 +251,15 @@ void frame_capture_thread(V4L2MMapCamera& cam) {
             continue;
         }
 
+        // TEMP: direct view of raw camera frame
+        cv::imshow("RG12_RAW_VIEW", decoded_frame);
+        int k = cv::waitKey(1);
+        if (k == 27) { // ESC to quit
+            keep_running = false;
+            break;
+        }
+        
+
         // Hand off the decoded frame to inference
         {
             std::lock_guard<std::mutex> lk(frame_mutex);
@@ -143,6 +300,183 @@ void frame_capture_thread(V4L2MMapCamera& cam) {
 
     std::cout << std::endl;
     nvtxRangePop(); // FrameCaptureThread_V4L2
+}
+*/
+/*
+void frame_capture_thread(cv::VideoCapture& cap, int cap_width, int cap_height) {
+
+    nvtxRangePush("FrameCaptureThread_GStreamer");
+
+    using clock = std::chrono::steady_clock;
+    auto last_print   = clock::now();
+    auto last_capture = clock::now();
+
+    int    frames        = 0;
+    double sum_period_ms = 0.0;
+    double sum_grab_ms   = 0.0;
+
+    cv::Mat frame;
+
+    std::cout << "Starting GStreamer capture loop...\n";
+
+    while (keep_running) {
+
+        auto t0 = clock::now();
+
+        // Grab + decode next frame from GStreamer pipeline
+        if (!cap.read(frame)) {
+            std::cerr << "GStreamer cap.read() failed or EOS\n";
+            // Small sleep to avoid tight error loop
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        auto t1 = clock::now();
+
+        double period_ms = std::chrono::duration<double, std::milli>(t0 - last_capture).count();
+        last_capture = t0;
+        double grab_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        // Ensure size is exactly what the rest of the pipeline expects
+        if (frame.cols != cap_width || frame.rows != cap_height) {
+            cv::resize(frame, frame, cv::Size(cap_width, cap_height));
+        }
+
+        // Hand off the decoded BGR frame to inference
+        {
+            std::lock_guard<std::mutex> lk(frame_mutex);
+            frame.copyTo(frame_back);
+            new_frame_available = true;
+        }
+
+        frame_ready.notify_one();
+
+        // Stats
+        frames++;
+        if (frames > 1) sum_period_ms += period_ms;
+        sum_grab_ms += grab_ms;
+
+        auto now = clock::now();
+        double elapsed = std::chrono::duration<double>(now - last_print).count();
+        if (elapsed >= 5.0) {
+            double src_fps  = (frames > 1) ? 1000.0 / (sum_period_ms / (frames - 1)) : 0.0;
+            double proc_fps = frames / elapsed;
+            double avg_grab = sum_grab_ms / frames;
+            double avg_per  = (frames > 1) ? sum_period_ms / (frames - 1) : 0.0;
+            double duty     = (avg_per > 0.0) ? (avg_grab / avg_per) * 100.0 : 0.0;
+
+            std::cout << "\r[GST] Source FPS: " << src_fps
+                      << " | Processed FPS: " << proc_fps
+                      << " | Avg period: " << avg_per << " ms"
+                      << " | Avg grab: " << avg_grab << " ms"
+                      << " | Duty: " << duty << " %    " << std::flush;
+
+            last_print   = now;
+            frames       = 0;
+            sum_grab_ms  = 0.0;
+            sum_period_ms= 0.0;
+        }
+    }
+
+    std::cout << std::endl;
+    nvtxRangePop(); // FrameCaptureThread_GStreamer
+}
+*/
+void frame_capture_thread(
+    GstElement*   sink,
+    int           cap_width,
+    int           cap_height,
+    unsigned char* d_bgr,
+    cudaStream_t  gst_stream
+) {
+    nvtxRangePush("FrameCaptureThread_GST_NVMM");
+
+    using clock = std::chrono::steady_clock;
+    auto last_print   = clock::now();
+    auto last_capture = clock::now();
+
+    int    frames        = 0;
+    double sum_period_ms = 0.0;   // for source FPS
+
+    std::cout << "Starting NVMM capture loop (GStreamer + CUDA)...\n";
+
+    while (keep_running) {
+
+        auto t0 = clock::now();
+
+        // --- Pull next sample from appsink (blocking) ---
+        GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+        if (!sample) {
+            std::cerr << "[GST] gst_app_sink_pull_sample() failed or EOS\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        GstBuffer* buffer = gst_sample_get_buffer(sample);
+        if (!buffer) {
+            std::cerr << "[GST] sample has no buffer\n";
+            gst_sample_unref(sample);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        GstMapInfo map;
+        if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            std::cerr << "[GST] Failed to map buffer\n";
+            gst_sample_unref(sample);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        // map.data is NvBufSurface* because memory:NVMM
+        NvBufSurface* surf = reinterpret_cast<NvBufSurface*>(map.data);
+
+        // --- NVMM RGBA -> device BGR (d_bgr) ---
+        if (!upload_nvmm_rgba_to_d_bgr(surf, 0, d_bgr, cap_width, cap_height, gst_stream)) {
+            std::cerr << "[GST] upload_nvmm_rgba_to_d_bgr() failed\n";
+            gst_buffer_unmap(buffer, &map);
+            gst_sample_unref(sample);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        gst_buffer_unmap(buffer, &map);
+        gst_sample_unref(sample);
+
+        // Hand off the decoded BGR frame to inference/display
+        {
+            std::lock_guard<std::mutex> lk(frame_mutex);
+            new_frame_available = true;
+        }
+        frame_ready.notify_one();
+
+        // --- Stats: only source + processed FPS ---
+        double period_ms = std::chrono::duration<double, std::milli>(t0 - last_capture).count();
+        last_capture = t0;
+
+        frames++;
+        if (frames > 1) {
+            sum_period_ms += period_ms;  // skip first period (frames>1)
+        }
+
+        auto now = clock::now();
+        double elapsed = std::chrono::duration<double>(now - last_print).count();
+        if (elapsed >= 5.0 && frames > 1) {
+            double src_fps  = 1000.0 / (sum_period_ms / (frames - 1)); // based on inter-arrival
+            double proc_fps = frames / elapsed;                         // loop throughput
+
+            std::cout << "\r[GST] Source FPS: " << src_fps
+                      << " | Processed FPS: " << proc_fps
+                      << "      " << std::flush;
+
+            last_print    = now;
+            frames        = 0;
+            sum_period_ms = 0.0;
+        }
+    }
+
+    std::cout << std::endl;
+    nvtxRangePop(); // FrameCaptureThread_GST_NVMM
 }
 
 
@@ -198,7 +532,6 @@ void inference_thread(
             // Fallbacks
             cv::Mat tmp;
             if (frame_back.type() != CV_8UC3) {
-                // e.g., if you ever feed grayscale/YUYV here (shouldn't for MJPEG)
                 cv::cvtColor(frame_back, tmp, cv::COLOR_GRAY2BGR);
             } else {
                 tmp = frame_back;
@@ -277,8 +610,6 @@ void inference_thread(
         cudaStreamWaitEvent(stream2, ev_count_final_ready, 0);
 
         // for debug safety
-        cudaEventSynchronize(ev_count_final_ready);
-
         //std::cout << "Detections: " << *h_count_final << std::endl;
 
         // If we have detections, run the classifier on each one
@@ -287,7 +618,7 @@ void inference_thread(
             const int N = *h_count_final;
 
             nvtxRangePush("ActionCls_Preprocessing_Batched");
-            action_cls_preprocess_gpu_staged_batched(
+            action_cls_preprocess_gpu_staged_batched_EI_copycat(
                 d_bgr, cap_width, cap_height,
                 d_final,        
                 scaleX, scaleY, pad_ratio,
@@ -304,11 +635,11 @@ void inference_thread(
 
 
             nvtxRangePush("ActionCls_Inference");
-            // NHWC (-1,96,96,1) -> set actual batch N for this frame
+            // set actual batch N for this frame
             nvinfer1::Dims4 inDims{N, 96, 96, 1};
             if (!clsIO.ctx->setBindingDimensions(0, inDims) ||
                 !clsIO.ctx->allInputDimensionsSpecified()) {
-                std::cerr << "[ACTION CLS] setBindingDimensions failed\n";
+                std::cerr << "[ACTION CLS]\n->setBindingDimensions failed\n";
             }
             clsIO.ctx->enqueueV2(clsIO.bindings, stream2, nullptr);
             nvtxRangePop(); // ActionCls_Inference
@@ -329,66 +660,77 @@ void inference_thread(
             cudaEventRecord(ev_vis_ready, stream2);
 
             // Wait until ActionVis packets are ready on host
-            cudaEventSynchronize(ev_vis_ready);
+            cudaStreamWaitEvent(stream2, ev_vis_ready, 0);
 
         #if DEBUG_VIS
 
-                nvtxRangePush("DebugVisualization");
-                {
-                    std::lock_guard<std::mutex> lock2(frame_copy_mutex);
-                    frame_back.copyTo(frame_front);
-                }
+            nvtxRangePush("DebugVisualization");
 
-                static const cv::Scalar COLORS[3] = {
-                    cv::Scalar(0,255,0),   // 0 = green
-                    cv::Scalar(0,0,255),   // 1 = red
-                    cv::Scalar(0,255,255)  // 2 = yellow
-                };
-                static const char* CLABELS[3] = {"G","R","Y"};
+            // ----------------------------------------------------------
+            // 1) Downscale frame_back → frame_front for faster display
+            // ----------------------------------------------------------
+            {
+                std::lock_guard<std::mutex> lock2(frame_copy_mutex);
+                cv::resize(frame_back, frame_front,
+                        cv::Size(cap_width / 2, cap_height / 2),
+                        0, 0, cv::INTER_AREA);
+            }
 
-                // Helper: clamp ROI to frame bounds
-                auto clampRect = [&](const cv::Rect& r)->cv::Rect {
-                    return r & cv::Rect(0, 0, frame_front.cols, frame_front.rows);
-                };
-
-                // Which class to blur (now: red)
-                constexpr int BLUR_CLASS = 1;
-
-                for (int i = 0; i < N; ++i) {
-                    const ActionVis& v = h_vis[i];
-
-                    // Build box directly from final pixel coords (already scaled on GPU)
-                    cv::Rect box(cv::Point(v.x1, v.y1), cv::Point(v.x2, v.y2));
-                    cv::Rect roi = clampRect(box);
-
-                    // Optional Gaussian blur for the chosen class
-                    if (v.cls == BLUR_CLASS && roi.area() > 0) {
-                        const int maxSide = std::max(roi.width, roi.height);
-                        int ksz = std::max(3, (maxSide / 8) | 1);        // odd kernel
-                        int kcap = std::max(3, ((std::min(roi.width, roi.height) - 1) | 1));
-                        if (ksz > kcap) ksz = kcap;
-                        if ((ksz & 1) == 0) ++ksz;
-                        cv::GaussianBlur(frame_front(roi), frame_front(roi),
-                                        {ksz, ksz}, 0, 0, cv::BORDER_REPLICATE);
-                    }
-
-                    // Draw overlay AFTER blur so it stays crisp
-                    //const cv::Scalar col = COLORS[std::clamp(v.cls, 0, 2)]; cpp17
-                    int idx = (v.cls < 0) ? 0 : (v.cls > 2 ? 2 : v.cls);
-                    const cv::Scalar col = COLORS[idx];
-                    cv::rectangle(frame_front, box, col, 2);
-
-                    char txt[64];
-                    //std::snprintf(txt, sizeof(txt), "%s (cam %d)", CLABELS[std::clamp(v.cls,0,2)], v.cam); cpp17
-                    std::snprintf(txt, sizeof(txt), "%s (cam %d)", CLABELS[idx], v.cam);
-                    cv::putText(frame_front, txt,
-                                {box.x, std::max(0, box.y - 6)},
-                                cv::FONT_HERSHEY_SIMPLEX, 0.6, col, 1, cv::LINE_AA);
-                }
-
+            // ----------------------------------------------------------
+            // 2) DEBUG_ONLY_FRAME → display the frame and skip overlays
+            // ----------------------------------------------------------
+            #if DEBUG_ONLY_FRAME
                 nvtxRangePop(); // DebugVisualization
+                continue;
+            #endif
 
-        #endif
+            // ----------------------------------------------------------
+            // 2) Draw overlays
+            // ----------------------------------------------------------
+
+            static const cv::Scalar COLORS[3] = {
+                cv::Scalar(0,255,0),   // green
+                cv::Scalar(0,0,255),   // red
+                cv::Scalar(0,255,255)  // yellow
+            };
+            static const char* CLABELS[3] = {"G","R","Y"};
+
+            float visScaleX = 0.5f;
+            float visScaleY = 0.5f;
+
+            auto clampRect = [&](const cv::Rect& r)->cv::Rect {
+                return r & cv::Rect(0, 0, frame_front.cols, frame_front.rows);
+            };
+
+            for (int i = 0; i < N; ++i) {
+                const ActionVis& v = h_vis[i];
+
+                cv::Rect box(
+                    cv::Point(static_cast<int>(v.x1 * visScaleX),
+                            static_cast<int>(v.y1 * visScaleY)),
+                    cv::Point(static_cast<int>(v.x2 * visScaleX),
+                            static_cast<int>(v.y2 * visScaleY))
+                );
+
+                cv::Rect roi = clampRect(box);
+
+                int idx = (v.cls < 0) ? 0 : (v.cls > 2 ? 2 : v.cls);
+                const cv::Scalar col = COLORS[idx];
+                cv::rectangle(frame_front, box, col, 2);
+
+                char txt[64];
+                std::snprintf(txt, sizeof(txt), "%s (cam %d)", CLABELS[idx], v.cam);
+                cv::putText(frame_front, txt,
+                            {box.x, std::max(0, box.y - 6)},
+                            cv::FONT_HERSHEY_SIMPLEX, 0.6, col, 1, cv::LINE_AA);
+            }
+
+            nvtxRangePop(); // DebugVisualization
+
+        #endif // DEBUG_VIS
+
+
+
     }
 
     nvtxRangePop(); // "InferenceThread"

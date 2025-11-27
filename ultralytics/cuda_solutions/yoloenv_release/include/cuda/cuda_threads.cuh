@@ -6,6 +6,11 @@
 #include <atomic>
 #include <cuda_runtime.h>
 #include <NvInfer.h>
+#include <gst/gst.h>
+#include <gst/app/gstappsink.h>
+#include <cuda.h>
+#include <cudaEGL.h>
+#include "nvbufsurface.h"
 
 #include "cuda_detection_struct.h"
 #include "v4l2_mmap_camera.h"
@@ -13,22 +18,36 @@
 #include "cuda_action_preprocess.cuh"
 #include "cuda_visual_struct.cuh"
 
-// ---- shared globals ----
-extern cv::Mat frame_back;         // Written by capture, read by inference
-extern cv::Mat frame_front;        // Written by inference, read by UI
+
+// -------------------------------- GLOBAL VARIABLES -------------------------------- //
+
+extern cv::Mat frame_back;
+extern cv::Mat frame_front;      
 
 extern std::mutex frame_mutex;
 extern std::mutex frame_copy_mutex;
-// extern std::mutex detection_mutex;
 
 extern std::condition_variable frame_ready;
 extern std::atomic<bool> new_frame_available;
 extern std::atomic<bool> keep_running;
 
+
 // ------------------------------ THREADS ENTRY POINTS ------------------------------ //
 
 // Frame capture thread
-void frame_capture_thread(V4L2MMapCamera& cam);
+// OLD: v4l2
+void frame_capture_thread_v4l2(V4L2MMapCamera& cam);
+// OLD: cv::VideoCapture
+//void frame_capture_thread(cv::VideoCapture& cap, int cap_width, int cap_height);
+
+// NEW: Gstreamer + CUDA
+void frame_capture_thread(
+    GstElement*   sink,       // appsink from the pipeline
+    int           cap_width,
+    int           cap_height,
+    unsigned char* d_bgr,     // device BGR buffer (GPU)
+    cudaStream_t  gst_stream  // CUDA stream for NVMM->BGR + D2H
+);
 
 // Inference thread
 void inference_thread(
