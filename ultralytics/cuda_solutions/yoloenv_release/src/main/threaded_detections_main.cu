@@ -1,4 +1,7 @@
 // assuming yolov8s.engine extracted from yolov8s.onnx generated with nms=False
+#if !defined(__aarch64__)
+#error "This build of yolodetector is Jetson-only (aarch64). Use the other branch for desktop."
+#endif
 
 #include <fstream>
 #include <iostream>
@@ -26,12 +29,11 @@
 // #include <sstream>
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
-#if defined(__aarch64__)
 // Jetson NVMM + CUDA EGL interop
 #include <cuda.h>
 #include <cudaEGL.h>
-#include <nvbufsurface.h>
-#endif
+#include "nvbufsurface.h"
+
 // --- for the test ---        
 
 #include "cuda_yolo_preprocess.cuh"
@@ -55,7 +57,6 @@ using namespace nvinfer1;
 
 // TEMP: global variables and kernels for NVMM EGL -> CUDA BGR copy
 // will be moved to kernel files later
-#if defined(__aarch64__)
 // Simple CUDA driver error checker
 static void checkCu(CUresult r, const char* msg)
 {
@@ -170,8 +171,9 @@ static bool upload_nvmm_rgba_to_d_bgr(
         return false;
     }
 
+    // unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.pPitch[0]);
     unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.frame.pPitch[0]);
-    int srcPitch             = eglFrame.frame.pitch[0];
+    int srcPitch             = static_cast<int>(eglFrame.pitch);
 
     dim3 block(16, 16);
     dim3 grid(
@@ -198,7 +200,6 @@ static bool upload_nvmm_rgba_to_d_bgr(
 
     return (err == cudaSuccess);
 }
-#endif // __aarch64__
 
 
 
@@ -489,7 +490,6 @@ int main() {
 
 
     // ----------------------------- VIDEO CAPTURE SETUP (Gstreamer)----------------------------- //
-#if defined(__aarch64__)
 
     std::cout << "\n[GST NVMM TEST] Opening camera via raw GStreamer (nvarguscamerasrc, NVMM RGBA)...\n";
 
@@ -542,6 +542,10 @@ int main() {
     std::cout << "[CAMERA SETTINGS]\n";
     std::cout << "Resolution: " << cap_width << "x" << cap_height << "\n";
     std::cout << "Channels:   " << cap_channels << " (BGR, stored in d_bgr)\n\n";
+
+    // GPU buffer for RGBA(NVMM) -> BGR
+    unsigned char* d_bgr = nullptr;
+    cudaMalloc(&d_bgr, static_cast<size_t>(cap_width) * cap_height * cap_channels);
 
     // Small CUDA stream just for this test
     cudaStream_t gst_stream;
@@ -630,47 +634,18 @@ int main() {
     gst_object_unref(sink);
     gst_object_unref(pipeline);
     cv::destroyWindow("GST_NVMM_TEST_FRAME");
-
+    cudaFree(d_bgr);
     std::cout << "[GST NVMM TEST] Done. Exiting before full pipeline.\n";
 
     // TEMP:  exit here.
     // Next wire this into threaded pipeline
     return 0;
 
-#else
-    // TEMP: Desktop / non-Jetson path: keep OpenCV + GStreamer capture
-    std::cout << "\nOpening camera via GStreamer (nvarguscamerasrc)...\n";
-
-    std::string gst_pipeline =
-        "nvarguscamerasrc sensor-id=0 ! "
-        "video/x-raw(memory:NVMM), width=(int)1920, height=(int)1080, framerate=30/1 ! "
-        "nvvidconv flip-method=0 ! "
-        "video/x-raw, format=(string)BGRx ! "
-        "videoconvert ! "
-        "video/x-raw, format=(string)BGR ! "
-        "appsink drop=true max-buffers=1";
-
-    cv::VideoCapture cap(gst_pipeline, cv::CAP_GSTREAMER);
-    if (!cap.isOpened()) {
-        std::cerr << "Error opening GStreamer pipeline\n";
-        return -1;
-    }
-    std::cout << "->GStreamer camera opened successfully\n";
-
-    int cap_width  = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-    int cap_height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
-    int cap_channels = 3; // BGR
-    size_t pinned_size = static_cast<size_t>(cap_width) * cap_height * cap_channels * sizeof(uchar);
-
-    std::cout << "[CAMERA SETTINGS]\n";
-    std::cout << "Resolution: " << cap_width << "x" << cap_height << "\n";
-    std::cout << "Channels:   " << cap_channels << " (BGR)\n\n";
-#endif
 
 
 
     // ----------------------------- MEMORY ALLOCATIONS ----------------------------- //
-
+#if 0
     // Allocate pinned memory for the frame data
     uchar* pinned_frame_data = nullptr;
     cudaHostAlloc((void**)&pinned_frame_data, num_cameras * pinned_size, cudaHostAllocDefault);
@@ -861,6 +836,7 @@ int main() {
     runtime->destroy();
     std::cout << "->cleanup complete\n\n";
 
+#endif
 
     return 0;
 
