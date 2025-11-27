@@ -503,8 +503,8 @@ void inference_thread(
 
     nvtxRangePush("InferenceThread");
 
-    // Wrap your pinned host buffer as a cv::Mat (no allocation, just a header)
-    cv::Mat pinned_mat(cap_height, cap_width, CV_8UC3, h_frame_bgr_pinned);
+    // h_frame_bgr_pinned will be unused once preprocess is fully GPU-only
+    (void)h_frame_bgr_pinned;
 
     // 10% padding around box when cropping for cls
     const float pad_ratio = 0.10f; 
@@ -521,33 +521,23 @@ void inference_thread(
 
         // Wait for a new frame from the capture thread
         std::unique_lock<std::mutex> lock(frame_mutex);
-        frame_ready.wait(lock, [] { return new_frame_available.load(); });
-        new_frame_available = false;
+        frame_ready.wait(lock, [] {
+            return new_frame_available.load() || !keep_running.load();
+        });
 
-        // Latch the decoded frame into pinned memory
-        nvtxRangePush("LatchToPinned");
-        if (frame_back.size() == cv::Size(cap_width, cap_height) && frame_back.type() == CV_8UC3) {
-            frame_back.copyTo(pinned_mat);
-        } else {
-            // Fallbacks
-            cv::Mat tmp;
-            if (frame_back.type() != CV_8UC3) {
-                cv::cvtColor(frame_back, tmp, cv::COLOR_GRAY2BGR);
-            } else {
-                tmp = frame_back;
-            }
-            if (tmp.size() != cv::Size(cap_width, cap_height)) {
-                cv::resize(tmp, pinned_mat, cv::Size(cap_width, cap_height));
-            } else {
-                tmp.copyTo(pinned_mat);
-            }
+        if (!keep_running && !new_frame_available) {
+            // Exit cleanly if shutting down and no new frame is pending
+            lock.unlock();
+            break;
         }
-        nvtxRangePop(); // LatchToPinned
 
-        // Release the lock ASAP so capture can proceed
-        lock.unlock();
+        // capture thread has written a new frame into d_bgr
+        new_frame_available = false;
+        // release lock so capture can proceed
+        lock.unlock(); 
 
 
+        // ---------------------- YOLO PREPROCESSING ----------------------
         nvtxRangePush("YOLO_Preprocessing");
         if (yoloIO.inType == nvinfer1::DataType::kFLOAT) {
             yolo_preprocess_gpu_batched(
@@ -581,11 +571,13 @@ void inference_thread(
         nvtxRangePop(); // YOLO_Preprocessing
 
 
+        // ---------------------- YOLO INFERENCE ----------------------
         nvtxRangePush("YOLO_Inference");
         yoloIO.ctx->enqueueV2(yoloIO.bindings, stream1, nullptr);
         nvtxRangePop(); // YOLO_Inference
 
 
+        // ---------------------- YOLO POSTPROCESSING ----------------------
         nvtxRangePush("YOLO_Postprocessing");
         if (yoloIO.outType == nvinfer1::DataType::kFLOAT) {
             yolo_postprocess_gpu(
@@ -617,6 +609,8 @@ void inference_thread(
 
             const int N = *h_count_final;
 
+
+            // ---------------------- ACTION CLS PREPROCESSING ----------------------
             nvtxRangePush("ActionCls_Preprocessing_Batched");
             action_cls_preprocess_gpu_staged_batched_EI_copycat(
                 d_bgr, cap_width, cap_height,
@@ -634,6 +628,7 @@ void inference_thread(
             nvtxRangePop(); // ActionCls_Preprocessing_Batched
 
 
+            // ---------------------- ACTION CLS INFERENCE ----------------------
             nvtxRangePush("ActionCls_Inference");
             // set actual batch N for this frame
             nvinfer1::Dims4 inDims{N, 96, 96, 1};
@@ -645,6 +640,7 @@ void inference_thread(
             nvtxRangePop(); // ActionCls_Inference
 
 
+            // ---------------------- ACTION CLS POSTPROCESSING ----------------------
             nvtxRangePush("ActionCls_Postprocessing_Batched");
             action_cls_postprocess_gpu_batched(
                 d_final,
@@ -667,17 +663,35 @@ void inference_thread(
             nvtxRangePush("DebugVisualization");
 
             // ----------------------------------------------------------
-            // 1) Downscale frame_back → frame_front for faster display
+            // 1) Download current GPU frame for visualization
+            //    (later maybe move drawing to GPU)
+            // ----------------------------------------------------------
+            static cv::Mat debug_frame;
+            if (debug_frame.empty()) {
+                debug_frame.create(cap_height, cap_width, CV_8UC3);
+            }
+
+            cudaMemcpyAsync(
+                debug_frame.data,
+                d_bgr,
+                static_cast<size_t>(cap_width) * cap_height * 3,
+                cudaMemcpyDeviceToHost,
+                stream1
+            );
+            cudaStreamSynchronize(stream1);
+
+            // ----------------------------------------------------------
+            // 2) Downscale debug_frame → frame_front for faster display
             // ----------------------------------------------------------
             {
                 std::lock_guard<std::mutex> lock2(frame_copy_mutex);
-                cv::resize(frame_back, frame_front,
-                        cv::Size(cap_width / 2, cap_height / 2),
-                        0, 0, cv::INTER_AREA);
+                cv::resize(debug_frame, frame_front,
+                           cv::Size(cap_width / 2, cap_height / 2),
+                           0, 0, cv::INTER_AREA);
             }
 
             // ----------------------------------------------------------
-            // 2) DEBUG_ONLY_FRAME → display the frame and skip overlays
+            // 3) DEBUG_ONLY_FRAME → display the frame and skip overlays
             // ----------------------------------------------------------
             #if DEBUG_ONLY_FRAME
                 nvtxRangePop(); // DebugVisualization
@@ -685,7 +699,7 @@ void inference_thread(
             #endif
 
             // ----------------------------------------------------------
-            // 2) Draw overlays
+            // 4) Draw overlays on frame_front
             // ----------------------------------------------------------
 
             static const cv::Scalar COLORS[3] = {
@@ -707,9 +721,9 @@ void inference_thread(
 
                 cv::Rect box(
                     cv::Point(static_cast<int>(v.x1 * visScaleX),
-                            static_cast<int>(v.y1 * visScaleY)),
+                              static_cast<int>(v.y1 * visScaleY)),
                     cv::Point(static_cast<int>(v.x2 * visScaleX),
-                            static_cast<int>(v.y2 * visScaleY))
+                              static_cast<int>(v.y2 * visScaleY))
                 );
 
                 cv::Rect roi = clampRect(box);
