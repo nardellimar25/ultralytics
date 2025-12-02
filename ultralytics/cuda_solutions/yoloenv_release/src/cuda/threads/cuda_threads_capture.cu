@@ -15,7 +15,7 @@
 #include <gst/app/gstappsink.h>
 #include "nvbufsurface.h"
 
-#include "kernels/cuda_threads.cuh"
+#include "threads/cuda_threads.cuh"
 #include "cuda_undistort.cuh"
 #include "cuda_nvmm_egl_upload.cuh"
 
