@@ -1,43 +1,182 @@
-#include "cuda_kernels.cuh"
+// src/kernels/cuda_kernels.cu
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+#include "kernels/cuda_kernels.cuh"
+#include "cuda_helpers.cuh"
+#include "cuda_structs.cuh"
+
+// TODO: remove old kernels below if not needed anymore
+
 // -------------------------------- HELPER FUNCTIONS -------------------------------- //
 
-__device__ __forceinline__ float iou(const Detection& a, const Detection& b) {
-    const float ax = fmaxf(0.f, a.x2 - a.x1);
-    const float ay = fmaxf(0.f, a.y2 - a.y1);
-    const float bx = fmaxf(0.f, b.x2 - b.x1);
-    const float by = fmaxf(0.f, b.y2 - b.y1);
+// __device__ __forceinline__ float iou(const Detection& a, const Detection& b) {
+//     const float ax = fmaxf(0.f, a.x2 - a.x1);
+//     const float ay = fmaxf(0.f, a.y2 - a.y1);
+//     const float bx = fmaxf(0.f, b.x2 - b.x1);
+//     const float by = fmaxf(0.f, b.y2 - b.y1);
 
-    const float areaA = ax * ay;
-    const float areaB = bx * by;
-    if (areaA <= 0.f || areaB <= 0.f) return 0.f;
+//     const float areaA = ax * ay;
+//     const float areaB = bx * by;
+//     if (areaA <= 0.f || areaB <= 0.f) return 0.f;
 
-    const float x1 = fmaxf(a.x1, b.x1);
-    const float y1 = fmaxf(a.y1, b.y1);
-    const float x2 = fminf(a.x2, b.x2);
-    const float y2 = fminf(a.y2, b.y2);
+//     const float x1 = fmaxf(a.x1, b.x1);
+//     const float y1 = fmaxf(a.y1, b.y1);
+//     const float x2 = fminf(a.x2, b.x2);
+//     const float y2 = fminf(a.y2, b.y2);
 
-    const float iw = fmaxf(0.f, x2 - x1);
-    const float ih = fmaxf(0.f, y2 - y1);
-    const float inter = iw * ih;
+//     const float iw = fmaxf(0.f, x2 - x1);
+//     const float ih = fmaxf(0.f, y2 - y1);
+//     const float inter = iw * ih;
 
-    // tiny epsilon to avoid division by zero when boxes touch
-    return inter / (areaA + areaB - inter + 1e-6f);
+//     // tiny epsilon to avoid division by zero when boxes touch
+//     return inter / (areaA + areaB - inter + 1e-6f);
+// }
+
+// __device__ float lerp(float a, float b, float t) {
+//     return a + t * (b - a);
+// }
+
+// __device__ inline float clampf(float v, float lo, float hi) {
+//     return fminf(fmaxf(v, lo), hi);
+// }
+
+
+// ---------------------------------- FRAME KERNELS ---------------------------------- //
+
+// NEW: to undistort fisheye BGR images (batched)
+// ---------------- Fisheye rectification for BGR (batched) -----------------
+//
+// Model: equidistant fisheye (like your NV12 rectify kernel)
+//   - fisheye FOV: fish_fov_deg
+//   - rectified horizontal FOV: out_hfov_deg
+//   - fisheye circle center: (cx_f, cy_f)
+//   - fisheye circle radius: r_f
+//
+// This kernel expects tightly packed BGR (pitch = width * 3).
+/*
+__device__ __forceinline__ void sampleBGR_bilinear(
+    const unsigned char* src,
+    int pitch,
+    int w,
+    int h,
+    float x,
+    float y,
+    float& B,
+    float& G,
+    float& R
+){
+    if (x < 0.f || y < 0.f || x > (float)(w - 1) || y > (float)(h - 1)) {
+        B = G = R = 0.f;
+        return;
+    }
+
+    int x0 = (int)floorf(x);
+    int y0 = (int)floorf(y);
+    int x1 = (x0 + 1 < w) ? x0 + 1 : w - 1;
+    int y1 = (y0 + 1 < h) ? y0 + 1 : h - 1;
+
+    float dx = x - x0;
+    float dy = y - y0;
+
+    const unsigned char* p00 = src + y0 * pitch + 3 * x0;
+    const unsigned char* p10 = src + y0 * pitch + 3 * x1;
+    const unsigned char* p01 = src + y1 * pitch + 3 * x0;
+    const unsigned char* p11 = src + y1 * pitch + 3 * x1;
+
+    float B00 = (float)p00[0], G00 = (float)p00[1], R00 = (float)p00[2];
+    float B10 = (float)p10[0], G10 = (float)p10[1], R10 = (float)p10[2];
+    float B01 = (float)p01[0], G01 = (float)p01[1], R01 = (float)p01[2];
+    float B11 = (float)p11[0], G11 = (float)p11[1], R11 = (float)p11[2];
+
+    float B0 = B00 + dx * (B10 - B00);
+    float B1 = B01 + dx * (B11 - B01);
+    float G0 = G00 + dx * (G10 - G00);
+    float G1 = G01 + dx * (G11 - G01);
+    float R0 = R00 + dx * (R10 - R00);
+    float R1 = R01 + dx * (R11 - R01);
+
+    B = B0 + dy * (B1 - B0);
+    G = G0 + dy * (G1 - G0);
+    R = R0 + dy * (R1 - R0);
 }
 
-__device__ float lerp(float a, float b, float t) {
-    return a + t * (b - a);
+__device__ __forceinline__ unsigned char clamp_u8f(float v)
+{
+    v = v < 0.f ? 0.f : (v > 255.f ? 255.f : v);
+    return (unsigned char)(v + 0.5f);
 }
 
-__device__ inline float clampf(float v, float lo, float hi) {
-    return fminf(fmaxf(v, lo), hi);
+// Fisheye → rectilinear, BGR, batched over Z = camera index.
+// Geometry is the same as your NV12 'rectifyNV12Kernel', but sampling BGR.
+
+__global__ void fisheye_rectify_bgr_kernel_batched(
+    const unsigned char* __restrict__ src_batch_bgr,
+    unsigned char*       __restrict__ dst_batch_bgr,
+    int                  width,
+    int                  height,
+    int                  num_cameras,
+    float                cx_f,
+    float                cy_f,
+    float                r_f,
+    float                f_fish,
+    float                fx,
+    float                cx_rect,
+    float                cy_rect
+){
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    int cam = blockIdx.z;
+
+    if (x >= width || y >= height || cam >= num_cameras) return;
+
+    const int pitch = width * 3;
+
+    // Offset to this camera slice
+    const unsigned char* src = src_batch_bgr + cam * (height * pitch);
+    unsigned char*       dst = dst_batch_bgr + cam * (height * pitch);
+
+    // --- Same geometry as your NV12 rectify kernel ----------------------
+    // (perspective → equidistant fisheye mapping)
+
+    float xn = (((float)x - cx_rect) / fx);
+    float yn = (((float)y - cy_rect) / fx);
+    float zn = 1.0f;
+
+    float invn = rsqrtf(xn*xn + yn*yn + zn*zn);
+    xn *= invn;
+    yn *= invn;
+    zn *= invn;
+
+    float theta = acosf(zn);
+    float phi   = atan2f(yn, xn);
+    float r     = f_fish * theta;
+
+    float sx = cx_f + r * cosf(phi);
+    float sy = cy_f + r * sinf(phi);
+
+    float dx = sx - cx_f;
+    float dy = sy - cy_f;
+    float maxr = r_f + 1.0f;
+    bool inside = (dx*dx + dy*dy) <= (maxr * maxr);
+
+    float B = 0.f, G = 0.f, R = 0.f;
+    if (inside) {
+        sampleBGR_bilinear(src, pitch, width, height, sx, sy, B, G, R);
+    }
+
+    int idx = y * pitch + 3 * x;
+    dst[idx + 0] = clamp_u8f(B);
+    dst[idx + 1] = clamp_u8f(G);
+    dst[idx + 2] = clamp_u8f(R);
 }
 
+
+*/
 
 // ----------------------------------   YOLO KERNELS ---------------------------------- //
 
+/*
 // resize multiple contiguous images from in_width/in_height to out_width/out_height
 __global__ void resize_bilinear_kernel_batched(
     uchar*       __restrict__ output_batch,
@@ -74,7 +213,6 @@ __global__ void resize_bilinear_kernel_batched(
     const float dx = src_x - x0;
     const float dy = src_y - y0;
 
-    // 3 channels (BGR), identical indexing to your single-frame kernel
     for (int c = 0; c < 3; ++c) {
         const int idx00 = (y0 * in_width + x0) * 3 + c;
         const int idx01 = (y0 * in_width + x1) * 3 + c;
@@ -179,7 +317,7 @@ __global__ void extract_detections_kernel_batched(
     constexpr int K = 84; // attrs per anchor (4 box + 80 classes)
     const float* out_b = output + size_t(b) * K * A;
 
-    float score = out_b[4 * A + a];  // score/conf channel (as you had)
+    float score = out_b[4 * A + a];
     if (score >= conf_thresh) {
         float cx = out_b[0 * A + a];
         float cy = out_b[1 * A + a];
@@ -195,7 +333,7 @@ __global__ void extract_detections_kernel_batched(
         d.x1 = x1; d.y1 = y1; d.x2 = x2; d.y2 = y2;
         d.score = score;
         d.class_id = 0;          
-        d.cam_index = b;         // NEW: tag with camera/batch
+        d.cam_index = b;        
 
         dets[g] = d;
         shared_mask[threadIdx.x] = 1;
@@ -336,18 +474,18 @@ __global__ void nms_kernel_final_output_batched(
         }
     }
 }
-
+*/
 
 // ---------------------------- ACTION CLASSIFIER KERNELS ---------------------------- //
 
-
+/*
 // Compute cropping parameters from detection bbox and original frame
 __global__ void cls_compute_params_kernel_batched(
     const Detection* __restrict__ d_boxes,
     int frameW, int frameH,
     float scaleX, float scaleY,
     float pad_ratio,
-    int dstW, int dstH,
+    int dstW, int dstH,                 
     int maxCropW, int maxCropH, int maxSquare,
     ClsDevParams* __restrict__ d_params_array,
     int batchN
@@ -365,7 +503,7 @@ __global__ void cls_compute_params_kernel_batched(
     if (x2 < x1) { float t=x1; x1=x2; x2=t; }
     if (y2 < y1) { float t=y1; y1=y2; y2=t; }
 
-    // Make square with padding
+    // Make square with padding (for crop window derivation)
     float bw = fmaxf(1.0f, x2 - x1);
     float bh = fmaxf(1.0f, y2 - y1);
     float side = fmaxf(bw, bh);
@@ -414,76 +552,45 @@ __global__ void cls_compute_params_kernel_batched(
     ox = max(0, min(ox, S - W));
     oy = max(0, min(oy, S - H));
 
-    // Scale from SxS to dst
-    float s2dst_x = (S > 0) ? (static_cast<float>(S) / static_cast<float>(dstW)) : 0.0f;
-    float s2dst_y = (S > 0) ? (static_cast<float>(S) / static_cast<float>(dstH)) : 0.0f;
+    // compute fitted output dims (longest side = dst, keep aspect)
+    int new_W = 1, new_H = 1;
+    if (W <= 0 || H <= 0) {
+        new_W = 1; new_H = 1;   // degenerate fallback
+    } else if (W >= H) {
+        // width dominates -> width becomes dstW
+        new_W = dstW;
+        // round to nearest; clamp to [1, dstH]
+        float h_f = (static_cast<float>(dstW) * static_cast<float>(H)) / static_cast<float>(W);
+        new_H = static_cast<int>(floorf(h_f + 0.5f));
+        if (new_H < 1)    new_H = 1;
+        if (new_H > dstH) new_H = dstH;
+    } else {
+        // height dominates -> height becomes dstH
+        new_H = dstH;
+        float w_f = (static_cast<float>(dstH) * static_cast<float>(W)) / static_cast<float>(H);
+        new_W = static_cast<int>(floorf(w_f + 0.5f));
+        if (new_W < 1)    new_W = 1;
+        if (new_W > dstW) new_W = dstW;
+    }
+
+    // Scales for rect->rect resize: map output pixel to input coords
+    const float s2dst_x = static_cast<float>(W) / static_cast<float>(new_W);
+    const float s2dst_y = static_cast<float>(H) / static_cast<float>(new_H);
 
     // Write params
     ClsDevParams p;
-    p.bx = ix0;  p.by = iy0;   
-    p.W  = W;    p.H  = H;     
-    p.S  = S;                  
-    p.ox = ox;   p.oy = oy;    
+    p.bx = ix0;  p.by = iy0;
+    p.W  = W;    p.H  = H;
+
+    p.new_W = new_W;
+    p.new_H = new_H;
+
+    p.ox = ox;   p.oy = oy;
     p.s2dst_x = s2dst_x;
     p.s2dst_y = s2dst_y;
 
     d_params_array[b] = p;
-}
 
-
-// Resize multiple images from specific parameters struct specifications
-__global__ void resize_bilinear_kernel_from_params_batched(
-    unsigned char* __restrict__ output_base,
-    const unsigned char* __restrict__ input_base,
-    int out_width, int out_height,
-    const ClsDevParams* __restrict__ params_array,
-    int maxSquare,     
-    int batchN
-){
-    const int b = blockIdx.z;  // detection index
-    if (b >= batchN) return;
-
-    const ClsDevParams p = params_array[b];
-
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= out_width || y >= out_height) return;
-
-    const int S  = p.S;
-    // p.s2dst_x/y must be S/outW and S/outH respectively.
-    const float sx = (x + 0.5f) * p.s2dst_x - 0.5f;
-    const float sy = (y + 0.5f) * p.s2dst_y - 0.5f;
-
-    int x0 = (int)floorf(sx);
-    int y0 = (int)floorf(sy);
-    int x1 = (x0 + 1 < S) ? (x0 + 1) : (S - 1);
-    int y1 = (y0 + 1 < S) ? (y0 + 1) : (S - 1);
-
-    float dx = sx - x0;
-    float dy = sy - y0;
-
-    // Slice bases
-    const size_t inSliceStride  = (size_t)maxSquare * maxSquare * 3;               
-    const size_t outSliceStride = (size_t)out_width * out_height * 3;       
-    const size_t inBase  = (size_t)b * inSliceStride;
-    const size_t outBase = (size_t)b * outSliceStride;
-
-    // Row offsets in the input square slice (note: row stride uses maxSquare)
-    const size_t row0 = inBase + (size_t)y0 * maxSquare * 3;
-    const size_t row1 = inBase + (size_t)y1 * maxSquare * 3;
-
-    const size_t o = outBase + ((size_t)y * out_width + x) * 3;
-
-    #pragma unroll
-    for (int c = 0; c < 3; ++c) {
-        float t0 = lerp((float)input_base[row0 + (size_t)x0 * 3 + c],
-                        (float)input_base[row0 + (size_t)x1 * 3 + c], dx);
-        float t1 = lerp((float)input_base[row1 + (size_t)x0 * 3 + c],
-                        (float)input_base[row1 + (size_t)x1 * 3 + c], dx);
-        float v  = lerp(t0, t1, dy);
-        v = v < 0.f ? 0.f : (v > 255.f ? 255.f : v);
-        output_base[o + c] = (unsigned char)v;
-    }
 }
 
 
@@ -533,57 +640,140 @@ __global__ void crop_img_kernel_batched(
 }
 
 
-// Pad the W×H crop to S×S square (letterbox) with black pixels
-__global__ void pad_to_square_kernel_batched(
-    const unsigned char* __restrict__ d_crop_base,
-    const ClsDevParams*  __restrict__ d_params_array,
-    unsigned char*        __restrict__ d_square_base,
-    int maxCropW, int maxCropH,
-    int maxSquare,
+// Rect (W×H)  ->  Rect (new_W×new_H) using bilinear, batched.
+__global__ void resize_bilinear_rect_to_rect_batched(
+    unsigned char* __restrict__ output_base,
+    const unsigned char* __restrict__ input_base,
+    const ClsDevParams* __restrict__ params_array,
+    int maxCropW,   
+    int maxCropH,   
+    int maxOutW,    
+    int maxOutH,    
     int batchN
 ){
-    const int b = blockIdx.z;  // detection index
+    const int b = blockIdx.z;
     if (b >= batchN) return;
 
-    // Per-detection params
-    const ClsDevParams p = d_params_array[b];
+    const ClsDevParams p = params_array[b];
+
+    const int inW  = p.W;
+    const int inH  = p.H;
+    const int outW = p.new_W;
+    const int outH = p.new_H;
+
+    // Early outs
+    if (inW <= 0 || inH <= 0) return;
 
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= outW || y >= outH) return;
 
-    // Only write within the S×S canvas of this detection
-    if (x >= p.S || y >= p.S) return;
+    // Use precomputed scales from params (input->output)
+    const float sx = (x + 0.5f) * p.s2dst_x - 0.5f;  // maps output center to input coord
+    const float sy = (y + 0.5f) * p.s2dst_y - 0.5f;
 
-    // Slice strides (bytes) for this batched layout
-    const size_t cropSliceStride   = static_cast<size_t>(maxCropW)  * maxCropH  * 3;
-    const size_t squareSliceStride = static_cast<size_t>(maxSquare) * maxSquare * 3;
+    int x0 = static_cast<int>(floorf(sx));
+    int y0 = static_cast<int>(floorf(sy));
 
-    // Destination index in this detection's S×S canvas
-    const size_t dst =
-        static_cast<size_t>(b) * squareSliceStride +
-        (static_cast<size_t>(y) * maxSquare + x) * 3;
+    // Clamp neighbors
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    int x1 = (x0 + 1 < inW) ? (x0 + 1) : (inW - 1);
+    int y1 = (y0 + 1 < inH) ? (y0 + 1) : (inH - 1);
 
-    // Where does (x,y) land relative to the placed crop
-    const int cx = x - p.ox;
-    const int cy = y - p.oy;
-    const bool in_crop = (cx >= 0 && cx < p.W && cy >= 0 && cy < p.H);
+    const float dx = sx - x0;
+    const float dy = sy - y0;
 
-    if (!in_crop) {
-        // black padding
-        d_square_base[dst + 0] = 0;
-        d_square_base[dst + 1] = 0;
-        d_square_base[dst + 2] = 0;
-        return;
+    // Slice bases & row strides (bytes)
+    const size_t inSliceStride  = static_cast<size_t>(maxCropW) * maxCropH * 3;
+    const size_t outSliceStride = static_cast<size_t>(maxOutW)  * maxOutH  * 3;
+
+    const size_t inBase  = static_cast<size_t>(b) * inSliceStride;
+    const size_t outBase = static_cast<size_t>(b) * outSliceStride;
+
+    const size_t inRowStride  = static_cast<size_t>(maxCropW) * 3;
+    const size_t outRowStride = static_cast<size_t>(maxOutW)  * 3;
+
+    const size_t row0 = inBase  + static_cast<size_t>(y0) * inRowStride;
+    const size_t row1 = inBase  + static_cast<size_t>(y1) * inRowStride;
+    const size_t o    = outBase + static_cast<size_t>(y)  * outRowStride + static_cast<size_t>(x) * 3;
+
+    #pragma unroll
+    for (int c = 0; c < 3; ++c) {
+        const float p00 = static_cast<float>(input_base[row0 + static_cast<size_t>(x0) * 3 + c]);
+        const float p01 = static_cast<float>(input_base[row0 + static_cast<size_t>(x1) * 3 + c]);
+        const float p10 = static_cast<float>(input_base[row1 + static_cast<size_t>(x0) * 3 + c]);
+        const float p11 = static_cast<float>(input_base[row1 + static_cast<size_t>(x1) * 3 + c]);
+
+        const float t0 = p00 + (p01 - p00) * dx;
+        const float t1 = p10 + (p11 - p10) * dx;
+        float v        = t0  + (t1  - t0)  * dy;
+
+        v = v < 0.f ? 0.f : (v > 255.f ? 255.f : v);
+        output_base[o + c] = static_cast<unsigned char>(v);
     }
-
-    // Read from the crop slice (packed W×H inside a maxCropW×maxCropH slice)
-    const size_t src =  static_cast<size_t>(b) * cropSliceStride + 
-                        (static_cast<size_t>(cy) * maxCropW + cx) * 3;
-
-    d_square_base[dst + 0] = d_crop_base[src + 0];
-    d_square_base[dst + 1] = d_crop_base[src + 1];
-    d_square_base[dst + 2] = d_crop_base[src + 2];
 }
+
+
+// Center-pad a fitted rect (new_W x new_H) into a 96x96 square (or generic dst)
+__global__ void pad_center_to_square_kernel_batched(
+    const unsigned char* __restrict__ src_base,      
+    const ClsDevParams*  __restrict__ params_array,  
+    unsigned char*       __restrict__ dst_base,      
+    int maxOutW, int maxOutH,                       
+    int dst,                                        
+    int batchN
+){
+    const int b = blockIdx.z;
+    if (b >= batchN) return;
+
+    const ClsDevParams p = params_array[b];
+    int newW = p.new_W;
+    int newH = p.new_H;
+
+    // Clamp (defensive)
+    if (newW < 0) newW = 0;
+    if (newH < 0) newH = 0;
+    if (newW > dst) newW = dst;
+    if (newH > dst) newH = dst;
+
+    // symmetric pad: left/top = floor, right/bottom = ceil
+    const int padL = (dst - newW) >> 1;                 
+    const int padT = (dst - newH) >> 1;                
+
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= dst || y >= dst) return;
+
+    // per-slice strides (bytes)
+    const size_t srcSliceStride = static_cast<size_t>(maxOutW) * maxOutH * 3;
+    const size_t dstSliceStride = static_cast<size_t>(dst)     * dst      * 3;
+
+    const size_t srcRowStride = static_cast<size_t>(maxOutW) * 3;
+    const size_t dstRowStride = static_cast<size_t>(dst)     * 3;
+
+    const size_t srcBase = static_cast<size_t>(b) * srcSliceStride;
+    const size_t dstBase = static_cast<size_t>(b) * dstSliceStride;
+
+    // map dst (x,y) back into the fitted rect
+    const int sx = x - padL;
+    const int sy = y - padT;
+
+    const size_t d = dstBase + static_cast<size_t>(y) * dstRowStride + static_cast<size_t>(x) * 3;
+
+    if (sx >= 0 && sx < newW && sy >= 0 && sy < newH) {
+        const size_t s = srcBase + static_cast<size_t>(sy) * srcRowStride + static_cast<size_t>(sx) * 3;
+        dst_base[d + 0] = src_base[s + 0];
+        dst_base[d + 1] = src_base[s + 1];
+        dst_base[d + 2] = src_base[s + 2];
+    } else {
+        // black pad
+        dst_base[d + 0] = 0;
+        dst_base[d + 1] = 0;
+        dst_base[d + 2] = 0;
+    }
+}
+
 
 
 // Convert interleaved BGR U8 (96x96) -> grayscale float [0,1]
@@ -615,6 +805,35 @@ __global__ void bgr_to_gray_norm_kernel_batched(
     float y601 = 0.114f * bch + 0.587f * gch + 0.299f * rch;
     out_gray_base[out1] = y601 * (1.0f / 255.0f);
 }
+// faster strided version
+__global__ void bgr_to_gray_norm_kernel_batched_strided(
+    float* __restrict__ out_gray_base,          
+    const unsigned char* __restrict__ in_bgr_base,
+    int outW, int outH,                           
+    int maxW, int maxH,                          
+    int batchN
+){
+    const int b = blockIdx.z; if (b >= batchN) return;
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= outW || y >= outH) return;
+
+    const size_t inSliceStride  = (size_t)maxW * maxH * 3;
+    const size_t outSliceStride = (size_t)outW * outH;
+
+    const size_t inRowStride  = (size_t)maxW * 3;
+    const size_t outRowStride = (size_t)outW;
+
+    const size_t in3  = (size_t)b * inSliceStride  + (size_t)y * inRowStride + (size_t)x * 3;
+    const size_t out1 = (size_t)b * outSliceStride + (size_t)y * outRowStride + (size_t)x;
+
+    float bch = (float)in_bgr_base[in3 + 0];
+    float gch = (float)in_bgr_base[in3 + 1];
+    float rch = (float)in_bgr_base[in3 + 2];
+    float y601 = 0.114f * bch + 0.587f * gch + 0.299f * rch;
+    out_gray_base[out1] = y601 * (1.0f / 255.0f);
+}
+
 
 
 // Create final visual struct of each detection
@@ -658,7 +877,7 @@ __global__ void final_visual_struct_kernel(
 
     d_out[i] = v;
 }
-
+*/
 
 /* ------------------------------- DEPRECATED OLD KERNELS ------------------------------- */
 
@@ -1215,5 +1434,164 @@ __global__ void bgr_to_gray_norm_kernel_batched_half(
 
     out_gray_base[out1] = __float2half_rn(y_norm);
 }
+
+
+
+
+
+
+
+
+
+
+__global__ void cls_compute_params_kernel_batched(
+    const Detection* __restrict__ d_boxes,
+    int frameW, int frameH,
+    float scaleX, float scaleY,
+    float pad_ratio,
+    int dstW, int dstH,
+    int maxCropW, int maxCropH, int maxSquare,
+    ClsDevParams* __restrict__ d_params_array,
+    int batchN
+){
+    const int b = blockIdx.z;
+    if (b >= batchN) return;
+
+    // Map bbox to CAMERA space
+    Detection det = d_boxes[b];
+    float x1 = det.x1 * scaleX;
+    float y1 = det.y1 * scaleY;
+    float x2 = det.x2 * scaleX;
+    float y2 = det.y2 * scaleY;
+
+    if (x2 < x1) { float t=x1; x1=x2; x2=t; }
+    if (y2 < y1) { float t=y1; y1=y2; y2=t; }
+
+    // Make square with padding
+    float bw = fmaxf(1.0f, x2 - x1);
+    float bh = fmaxf(1.0f, y2 - y1);
+    float side = fmaxf(bw, bh);
+    float pad  = side * pad_ratio;
+
+    float cx = 0.5f*(x1 + x2);
+    float cy = 0.5f*(y1 + y2);
+    float half = 0.5f*side + pad;
+
+    // Square ROI (float)
+    float rx1 = cx - half;
+    float ry1 = cy - half;
+    float rx2 = cx + half;
+    float ry2 = cy + half;
+
+    // Integer crop window clipped to frame
+    int ix0 = static_cast<int>(floorf(rx1));
+    int iy0 = static_cast<int>(floorf(ry1));
+    int ix1 = static_cast<int>(ceilf (rx2));
+    int iy1 = static_cast<int>(ceilf (ry2));
+
+    ix0 = max(0, min(ix0, frameW));
+    iy0 = max(0, min(iy0, frameH));
+    ix1 = max(0, min(ix1, frameW));
+    iy1 = max(0, min(iy1, frameH));
+
+    int W = max(0, ix1 - ix0);
+    int H = max(0, iy1 - iy0);
+
+    // Clamp to scratch capacities
+    if (W > maxCropW) W = maxCropW;
+    if (H > maxCropH) H = maxCropH;
+
+    // Square side S (clamped)
+    int S = static_cast<int>(ceilf(fmaxf(rx2 - rx1, ry2 - ry1)));
+    if (S < 1) S = 1;
+    if (S > maxSquare) S = maxSquare;
+
+    // Offsets of crop top-left within the SxS square
+    float fx_off = (float)ix0 - rx1;  // how far inside the square the crop begins (x)
+    float fy_off = (float)iy0 - ry1;  // (y)
+    int ox = static_cast<int>(floorf(fx_off + 0.5f)); // round to nearest int
+    int oy = static_cast<int>(floorf(fy_off + 0.5f));
+
+    // Clamp offsets so W×H fits inside S×S
+    ox = max(0, min(ox, S - W));
+    oy = max(0, min(oy, S - H));
+
+    // Scale from SxS to dst
+    float s2dst_x = (S > 0) ? (static_cast<float>(S) / static_cast<float>(dstW)) : 0.0f;
+    float s2dst_y = (S > 0) ? (static_cast<float>(S) / static_cast<float>(dstH)) : 0.0f;
+
+    // Write params
+    ClsDevParams p;
+    p.bx = ix0;  p.by = iy0;   
+    p.W  = W;    p.H  = H;     
+    p.S  = S;                  
+    p.ox = ox;   p.oy = oy;    
+    p.s2dst_x = s2dst_x;
+    p.s2dst_y = s2dst_y;
+
+    d_params_array[b] = p;
+}
+
+
+
+
+
+
+// Pad the W×H crop to S×S square (letterbox) with black pixels
+__global__ void pad_to_square_kernel_batched(
+    const unsigned char* __restrict__ d_crop_base,
+    const ClsDevParams*  __restrict__ d_params_array,
+    unsigned char*        __restrict__ d_square_base,
+    int maxCropW, int maxCropH,
+    int maxSquare,
+    int batchN
+){
+    const int b = blockIdx.z;  // detection index
+    if (b >= batchN) return;
+
+    // Per-detection params
+    const ClsDevParams p = d_params_array[b];
+
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // Only write within the S×S canvas of this detection
+    if (x >= p.S || y >= p.S) return;
+
+    // Slice strides (bytes) for this batched layout
+    const size_t cropSliceStride   = static_cast<size_t>(maxCropW)  * maxCropH  * 3;
+    const size_t squareSliceStride = static_cast<size_t>(maxSquare) * maxSquare * 3;
+
+    // Destination index in this detection's S×S canvas
+    const size_t dst =
+        static_cast<size_t>(b) * squareSliceStride +
+        (static_cast<size_t>(y) * maxSquare + x) * 3;
+
+    // Where does (x,y) land relative to the placed crop
+    const int cx = x - p.ox;
+    const int cy = y - p.oy;
+    const bool in_crop = (cx >= 0 && cx < p.W && cy >= 0 && cy < p.H);
+
+    if (!in_crop) {
+        // black padding
+        d_square_base[dst + 0] = 0;
+        d_square_base[dst + 1] = 0;
+        d_square_base[dst + 2] = 0;
+        return;
+    }
+
+    // Read from the crop slice (packed W×H inside a maxCropW×maxCropH slice)
+    const size_t src =  static_cast<size_t>(b) * cropSliceStride + 
+                        (static_cast<size_t>(cy) * maxCropW + cx) * 3;
+
+    d_square_base[dst + 0] = d_crop_base[src + 0];
+    d_square_base[dst + 1] = d_crop_base[src + 1];
+    d_square_base[dst + 2] = d_crop_base[src + 2];
+}
+
+
+
+
+
 
 */
