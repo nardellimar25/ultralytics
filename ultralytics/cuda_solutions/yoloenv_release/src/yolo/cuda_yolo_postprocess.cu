@@ -2,9 +2,10 @@
 #include <iostream>
 #include <cuda_fp16.h>  
 
-#include "cuda_kernels.cuh"     
-#include "cuda_detection_struct.h"
 #include "cuda_yolo_postprocess.cuh"
+#include "kernels/cuda_kernels.cuh"     
+#include "cuda_structs.cuh"
+
 
 // This function runs the post-processing on the GPU
 // It extracts detections, applies NMS, and returns the final detections

@@ -2,16 +2,16 @@
 #include <iostream>
 #include <cuda_fp16.h>
 
-#include "cuda_kernels.cuh"     
-#include "cuda_detection_struct.h"   
 #include "cuda_yolo_preprocess.cuh"
+#include "kernels/cuda_kernels.cuh"     
+#include "cuda_structs.cuh"   
+
 
 // This function runs the yolo pre-processing on the GPU
 // It converts the input image from BGR to float and normalizes it
+// Assumes host input is also packed contiguously by frame
 void yolo_preprocess_gpu_batched(
-    // outputs (contiguous base for TRT binding)
     float*              d_yolo_out_base,      
-    // inputs (contiguous per stage)
     const unsigned char* h_frames_bgr_pinned, 
     unsigned char*       d_cap_batch_u8,     
     unsigned char*       d_resized_batch_u8,  
@@ -27,14 +27,9 @@ void yolo_preprocess_gpu_batched(
 ){
     if (num_cameras <= 0) return;
 
-    // H2D copy per camera into contiguous device input
-    // (assumes host input is also packed contiguously by frame)
-    for (int i = 0; i < num_cameras; ++i) {
-        const size_t off = static_cast<size_t>(i) * pinned_size;
-        cudaMemcpyAsync(d_cap_batch_u8 + off,
-                        h_frames_bgr_pinned + off,
-                        pinned_size, cudaMemcpyHostToDevice, stream);
-    }
+    // unused
+    (void)h_frames_bgr_pinned;
+    (void)pinned_size;
 
     cudaError_t err;
 
@@ -60,8 +55,8 @@ void yolo_preprocess_gpu_batched(
 
     // 2) U8 (BGR) -> float (RGB, CHW [0,1]) directly into contiguous [N,3,H,W]
     preprocess_kernel_batched<<<gridResize, blockXY, 0, stream>>>(
-        d_yolo_out_base,          // contiguous float base
-        d_resized_batch_u8,       // contiguous U8 base
+        d_yolo_out_base,          
+        d_resized_batch_u8,      
         out_img_width, out_img_height,
         num_cameras
     );
@@ -73,9 +68,7 @@ void yolo_preprocess_gpu_batched(
 }
 // FP16 variant
 void yolo_preprocess_gpu_batched(
-    // outputs (contiguous base for TRT binding)
     __half*            d_yolo_out_base_h,    
-    // inputs (contiguous per stage)
     const unsigned char* h_frames_bgr_pinned, 
     unsigned char*       d_cap_batch_u8,    
     unsigned char*       d_resized_batch_u8,  
@@ -92,12 +85,16 @@ void yolo_preprocess_gpu_batched(
     if (num_cameras <= 0) return;
 
     // H2D copy per camera into contiguous device input
-    for (int i = 0; i < num_cameras; ++i) {
-        const size_t off = static_cast<size_t>(i) * pinned_size;
-        cudaMemcpyAsync(d_cap_batch_u8 + off,
-                        h_frames_bgr_pinned + off,
-                        pinned_size, cudaMemcpyHostToDevice, stream);
-    }
+    // for (int i = 0; i < num_cameras; ++i) {
+    //     const size_t off = static_cast<size_t>(i) * pinned_size;
+    //     cudaMemcpyAsync(d_cap_batch_u8 + off,
+    //                     h_frames_bgr_pinned + off,
+    //                     pinned_size, cudaMemcpyHostToDevice, stream);
+    // }
+
+    // kept in the signature for ABI compatibility, but are no longer used.
+    (void)h_frames_bgr_pinned;
+    (void)pinned_size;
 
     cudaError_t err;
 
@@ -123,8 +120,8 @@ void yolo_preprocess_gpu_batched(
 
     // 2) U8 (BGR) -> __half (RGB, CHW [0,1]) directly into contiguous [N,3,H,W]
     preprocess_kernel_batched_half<<<gridResize, blockXY, 0, stream>>>(
-        d_yolo_out_base_h,        // contiguous __half base
-        d_resized_batch_u8,       // contiguous U8 base
+        d_yolo_out_base_h,       
+        d_resized_batch_u8,      
         out_img_width, out_img_height,
         num_cameras
     );
