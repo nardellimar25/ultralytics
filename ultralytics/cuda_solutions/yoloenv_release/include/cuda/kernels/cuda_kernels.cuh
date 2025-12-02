@@ -4,10 +4,13 @@
 #include <opencv2/core.hpp>
 #include <cuda_fp16.h>
 
-#include "cuda_detection_struct.h"
-#include "cuda_action_preprocess.cuh"
-#include "cuda_visual_struct.cuh"
+#include "cuda_structs.cuh"
+#include "cuda_helpers.cuh"
+#include "frame_kernels.cuh"
+#include "yolo_kernels.cuh"
+#include "cls_kernels.cuh"
 
+/*
 
 // -------------------------------- HELPER FUNCTIONS -------------------------------- //
 
@@ -17,9 +20,9 @@ __device__ float iou(const Detection& a, const Detection& b);
 __device__ float lerp(float a, float b, float t);
 // Clamps value v to the range [lo, hi]
 __device__ inline float clampf(float v, float lo, float hi);
+// Clamps float v to the range [0, 255] and converts to unsigned char
+__device__ __forceinline__ unsigned char clamp_u8f(float v);
 
-
-// ---------------------------------- CUDA KERNELS ---------------------------------- //
 
 // ---------------------------------- CUDA KERNELS ---------------------------------- //
 
@@ -33,15 +36,22 @@ __global__ void resize_bilinear_kernel_batched(
     float scale_x, float scale_y,
     int num_cameras
 );
-
-// Bilinear resize using precomputed parameters (batched).
-// Uses per-batch parameters from ClsDevParams.
 __global__ void resize_bilinear_kernel_from_params_batched(
+    uchar* __restrict__ output,
+    const uchar* __restrict__ input,
+    int out_width, int out_height,
+    const ClsDevParams* __restrict__ p,
+    int maxSquare,
+    int batchN
+);
+__global__ void resize_bilinear_rect_to_rect_batched(
     unsigned char* __restrict__ output_base,
     const unsigned char* __restrict__ input_base,
-    int out_width, int out_height,
     const ClsDevParams* __restrict__ params_array,
-    int maxSquare,     
+    int maxCropW,   
+    int maxCropH,   
+    int maxOutW,    
+    int maxOutH,    
     int batchN
 );
 
@@ -135,12 +145,27 @@ __global__ void pad_to_square_kernel_batched(
     int maxSquare,
     int batchN
 );
+__global__ void pad_center_to_square_kernel_batched(
+    const unsigned char* __restrict__ src_base,      // fitted output from resize
+    const ClsDevParams*  __restrict__ params_array,  // provides new_W/new_H
+    unsigned char*       __restrict__ dst_base,      // final square canvas
+    int maxOutW, int maxOutH,                        // src slice strides (pixels)
+    int dst,                                         // e.g. 96
+    int batchN
+);
 
 // Convert BGR (U8) image to grayscale float [0,1] (batched, FP32).
 __global__ void bgr_to_gray_norm_kernel_batched(
     float* __restrict__ out_gray_base,
     const unsigned char* __restrict__ in_bgr_base,
     int width, int height,
+    int batchN
+);
+__global__ void bgr_to_gray_norm_kernel_batched_strided(
+    float* __restrict__ out_gray_base,           // [N, outH, outW]
+    const unsigned char* __restrict__ in_bgr_base,// [N, maxH, maxW, 3], valid WxH
+    int outW, int outH,                           // typically 96, 96
+    int maxW, int maxH,                           // stride basis for input slice
     int batchN
 );
 
@@ -154,3 +179,51 @@ __global__ void final_visual_struct_kernel(
     ActionVis*       __restrict__ d_out
 );
 
+
+// Batched Brown–Conrady undistortion on 8UC3 BGR.
+// Layout: d_src_batch_bgr / d_dst_batch_bgr are contiguous [num_cameras, H, W, 3].
+__global__ void undistort_bgr_kernel_batched(
+    const unsigned char* __restrict__ d_src_batch_bgr,
+    unsigned char*       __restrict__ d_dst_batch_bgr,
+    int                  width,
+    int                  height,
+    int                  num_cameras,
+    float                fx, float fy,
+    float                cx, float cy,
+    float                k1, float k2,
+    float                p1, float p2,
+    float                k3
+);
+
+
+// Batched equidistant fisheye undistortion on 8UC3 BGR.
+// Layout: d_src_batch_bgr / d_dst_batch_bgr are contiguous [num_cameras, H, W, 3].
+__global__ void fisheye_rectify_bgr_kernel_batched(
+    const unsigned char* __restrict__ src_batch_bgr,
+    unsigned char*       __restrict__ dst_batch_bgr,
+    int                  width,
+    int                  height,
+    int                  num_cameras,
+    float                cx_f,
+    float                cy_f,
+    float                r_f,
+    float                f_fish,
+    float                fx,
+    float                cx_rect,
+    float                cy_rect
+);
+
+// Bilinear sampling of BGR image at floating point coordinates (device function).
+__device__ __forceinline__ void sampleBGR_bilinear(
+    const unsigned char* src,
+    int pitch,
+    int w,
+    int h,
+    float x,
+    float y,
+    float& B,
+    float& G,
+    float& R
+);
+
+*/
