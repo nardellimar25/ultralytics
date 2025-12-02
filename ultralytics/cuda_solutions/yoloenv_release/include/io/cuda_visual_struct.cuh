@@ -1,5 +1,9 @@
 #pragma once
+
 #include <cuda_runtime.h>
+
+
+// ------------------------------- VISUAL STRUCT -------------------------------- //
 
 // Final per-detection info for UI/blur on the ORIGINAL frame
 // 32 bytes, 16B aligned, coalesced-friendly
