@@ -18,8 +18,18 @@
 #include <chrono>
 #include <nvtx3/nvToolsExt.h>
 #include <cuda_fp16.h>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <gst/gst.h>
+#include <gst/app/gstappsink.h>
+#include <cuda.h>
+#include <cudaEGL.h>
+#include "nvbufsurface.h"
+
 
 // --- for the test ---
+
 // #include <sys/stat.h>
 // #include <sys/types.h>
 // #include <unistd.h>
@@ -27,36 +37,19 @@
 // #include <iomanip>
 // #include <fstream>
 // #include <sstream>
-#include <gst/gst.h>
-#include <gst/app/gstappsink.h>
-// Jetson NVMM + CUDA EGL interop
-#include <cuda.h>
-#include <cudaEGL.h>
-#include "nvbufsurface.h"
 
 // --- for the test ---        
 
-#include "cuda_yolo_preprocess.cuh"
-#include "cuda_yolo_postprocess.cuh"
-#include "cuda_kernels.cuh"
-#include "cuda_detection_struct.h"
-#include "cuda_threads.cuh"
-#include "v4l2_mmap_camera.h"
-#include "yolodetect.h"
-#include "engine_debug_utils.h"
+#include "threads/cuda_threads.cuh"
 #include "engine_io.hpp"
-#include "cuda_action_preprocess.cuh"
-#include "cuda_visual_struct.cuh"
+#include "engine_debug_utils.h"
+#include "cuda_structs.cuh"
+#include "yolodetect.h"
 
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
 
 using namespace nvinfer1;
 
 
-// TEMP: global variables and kernels for NVMM EGL -> CUDA BGR copy
-// will be moved to kernel files later
 // Simple CUDA driver error checker
 static void checkCu(CUresult r, const char* msg)
 {
@@ -68,140 +61,6 @@ static void checkCu(CUresult r, const char* msg)
                   << (errStr ? errStr : "unknown") << " (" << r << ")\n";
     }
 }
-
-// Very simple RGBA -> BGR copy (no resize yet, 1:1 copy)
-__global__ void rgba_to_bgr_linear_kernel(
-    const unsigned char* __restrict__ src,
-    int srcPitch,        // in bytes
-    int width,
-    int height,
-    unsigned char* __restrict__ dst   // tightly packed BGR
-)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= width || y >= height) return;
-
-    const unsigned char* srcRow = src + y * srcPitch + 4 * x;
-    unsigned char r = srcRow[0];
-    unsigned char g = srcRow[1];
-    unsigned char b = srcRow[2];
-
-    int dstIdx = (y * width + x) * 3;
-    dst[dstIdx + 0] = b;
-    dst[dstIdx + 1] = g;
-    dst[dstIdx + 2] = r;
-}
-
-// Map NvBufSurface -> EGLImage -> CUDA and copy RGBA into d_bgr
-static bool upload_nvmm_rgba_to_d_bgr(
-    NvBufSurface* surf,
-    int           index,       // plane index (usually 0)
-    unsigned char* d_bgr,      // destination on device
-    int           width,
-    int           height,
-    cudaStream_t  stream
-)
-{
-    // Map for device access
-    if (NvBufSurfaceMap(surf, index, 0, NVBUF_MAP_READ) != 0)
-    {
-        std::cerr << "[CUDA-EGL] NvBufSurfaceMap failed\n";
-        return false;
-    }
-
-    if (NvBufSurfaceSyncForDevice(surf, index, 0) != 0)
-    {
-        std::cerr << "[CUDA-EGL] NvBufSurfaceSyncForDevice failed\n";
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    // Map to EGLImage
-    if (NvBufSurfaceMapEglImage(surf, index) != 0)
-    {
-        std::cerr << "[CUDA-EGL] NvBufSurfaceMapEglImage failed\n";
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    EGLImageKHR eglImage = surf->surfaceList[index].mappedAddr.eglImage;
-    if (!eglImage)
-    {
-        std::cerr << "[CUDA-EGL] eglImage is null\n";
-        NvBufSurfaceUnMapEglImage(surf, index);
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    CUgraphicsResource cuRes = nullptr;
-    CUeglFrame eglFrame;
-
-    CUresult r = cuGraphicsEGLRegisterImage(
-        &cuRes,
-        eglImage,
-        CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-    if (r != CUDA_SUCCESS)
-    {
-        checkCu(r, "cuGraphicsEGLRegisterImage");
-        NvBufSurfaceUnMapEglImage(surf, index);
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    r = cuGraphicsResourceGetMappedEglFrame(
-        &eglFrame,
-        cuRes,
-        0, 0);
-    if (r != CUDA_SUCCESS)
-    {
-        checkCu(r, "cuGraphicsResourceGetMappedEglFrame");
-        cuGraphicsUnregisterResource(cuRes);
-        NvBufSurfaceUnMapEglImage(surf, index);
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    if (eglFrame.frameType != CU_EGL_FRAME_TYPE_PITCH)
-    {
-        std::cerr << "[CUDA-EGL] Unexpected frameType (not PITCH)\n";
-        cuGraphicsUnregisterResource(cuRes);
-        NvBufSurfaceUnMapEglImage(surf, index);
-        NvBufSurfaceUnMap(surf, index, 0);
-        return false;
-    }
-
-    // unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.pPitch[0]);
-    unsigned char* srcDevPtr = static_cast<unsigned char*>(eglFrame.frame.pPitch[0]);
-    int srcPitch             = static_cast<int>(eglFrame.pitch);
-
-    dim3 block(16, 16);
-    dim3 grid(
-        (width  + block.x - 1) / block.x,
-        (height + block.y - 1) / block.y);
-
-    rgba_to_bgr_linear_kernel<<<grid, block, 0, stream>>>(
-        srcDevPtr,
-        srcPitch,
-        width,
-        height,
-        d_bgr);
-
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-    {
-        std::cerr << "[CUDA-EGL] rgba_to_bgr_linear_kernel error: "
-                  << cudaGetErrorString(err) << "\n";
-    }
-
-    cuGraphicsUnregisterResource(cuRes);
-    NvBufSurfaceUnMapEglImage(surf, index);
-    NvBufSurfaceUnMap(surf, index, 0);
-
-    return (err == cudaSuccess);
-}
-
-
 
 
 // ------------------------------ MAIN FUNCTION ------------------------------ //
@@ -420,75 +279,6 @@ int main() {
     clsIO.outElems = static_cast<size_t>(cls_outputSize);
 
 
-    // ----------------------------- VIDEO CAPTURE SETUP (v4l2)----------------------------- //
-    {
-    // V4L2MMapCamera cam;
-    // std::cout << "\nOpening camera via v4l2...\n";
-    // if (!cam.openDevice("/dev/video0")) {
-    //     std::cerr << "Error opening camera device\n";
-    //     return -1;
-    // }
-    // std::cout << "->camera opened successfully\n";
-
-    // std::cout << "\n[CAMERA SETTINGS]\n";
-    // if (!cam.printCapabilities()) {
-    //     std::cerr << "Error getting camera capabilities\n";
-    //     return -1;
-    // }
-    // if (!cam.printCropCapabilities()) {
-    //     // std::cerr << "Error getting camera crop capabilities\n";
-    //     std::cerr << "Warning: camera does not support CROPCAP (VIDIOC_CROPCAP), continuing...\n";
-    //     // return -1;
-    // }
-
-    // std::cout << "\nAvailable pixel formats:\n";
-    // cam.listFormats(true);   // just to see what the driver supports
-
-    // // For Jetson CSI IMX390 a typical mode is 1920x1080 NV12 or YUYV.
-    // uint32_t req_width  = 1920;
-    // uint32_t req_height = 1080;
-    // uint32_t req_pixfmt = V4L2_PIX_FMT_RG12; // V4L2_PIX_FMT_NV12; //V4L2_PIX_FMT_YUYV; //V4L2_PIX_FMT_MJPEG;
-
-
-    // std::cout << "\nInitializing camera...\n";
-    // v4l2_cropcap crop{};
-    // if (!cam.setFormat(req_width, req_height, req_pixfmt)) { //(1280, 720, V4L2_PIX_FMT_MJPEG)
-    //     //std::cerr << "Error setting camera format\n";
-    //     std::cerr << "Error setting camera format "
-    //           << req_width << "x" << req_height
-    //           << " " << V4L2MMapCamera::fourccToString(req_pixfmt) << "\n";
-    //     return -1;
-    // }
-    // if (!cam.setFrameRate(30)) {
-    //     std::cerr << "Error setting frame rate\n";
-    // }
-    // std::cout << "->camera initialized successfully\n";
-
-    // int cap_width  = cam.width();
-    // int cap_height  = cam.height();
-    // int cap_channels = 3; // will be decoded to BGR
-    // size_t pinned_size = cap_width * cap_height * cap_channels * sizeof(uchar);
-    // uint32_t f = cam.pixfmt();
-
-    // // Allocate pinned memory for the frame data
-    // std::cout << "\nAllocating camera pinned memory buffers...\n";
-    // if (!cam.initMMap(5)) {
-    //     std::cerr << "Error initializing memory map\n";
-    //     return -1;
-    // }
-    // std::cout << "->camera pinned memory buffers allocated successfully\n";
-
-    // // Start the camera
-    // std::cout << "\nStarting camera...\n";
-    // if (!cam.start()) {
-    //     std::cerr << "Error starting camera\n";
-    //     return -1;
-    // }
-    // std::cout << "->camera started successfully\n\n";
-    }
-
-
-
     // ----------------------------- VIDEO CAPTURE SETUP (Gstreamer)----------------------------- //
 
     std::cout << "\n[GST NVMM TEST] Opening camera via raw GStreamer (nvarguscamerasrc, NVMM RGBA)...\n";
@@ -537,122 +327,35 @@ int main() {
     int cap_width    = 1920;
     int cap_height   = 1080;
     int cap_channels = 3;   // final BGR
-    size_t pinned_size = static_cast<size_t>(cap_width) * cap_height * cap_channels * sizeof(uchar);
+    //size_t pinned_size = static_cast<size_t>(cap_width) * cap_height * cap_channels * sizeof(uchar);
+    size_t frame_bytes = static_cast<size_t>(cap_width) * cap_height * cap_channels;
 
     std::cout << "[CAMERA SETTINGS]\n";
     std::cout << "Resolution: " << cap_width << "x" << cap_height << "\n";
     std::cout << "Channels:   " << cap_channels << " (BGR, stored in d_bgr)\n\n";
 
-    // GPU buffer for RGBA(NVMM) -> BGR
-    unsigned char* d_bgr = nullptr;
-    cudaMalloc(&d_bgr, static_cast<size_t>(cap_width) * cap_height * cap_channels);
-
-    // Small CUDA stream just for this test
+    // Small CUDA stream just for frame caputure thread
     cudaStream_t gst_stream;
     cudaStreamCreate(&gst_stream);
 
-    // Debug window (optional)
-    cv::namedWindow("GST_NVMM_TEST_FRAME", cv::WINDOW_AUTOSIZE);
-    cv::Mat dbg_frame(cap_height, cap_width, CV_8UC3);
-
-    int frame_idx = 0;
-    bool running = true;
-
-    while (running && frame_idx < 100) {
-        GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
-        if (!sample) {
-            std::cerr << "[GST NVMM TEST] Failed to pull sample (EOS or error)\n";
-            break;
-        }
-
-        GstCaps* caps = gst_sample_get_caps(sample);
-        if (!caps) {
-            std::cerr << "[GST NVMM TEST] Sample has no caps\n";
-            gst_sample_unref(sample);
-            break;
-        }
-
-        GstStructure* st = gst_caps_get_structure(caps, 0);
-        int w = 0, h = 0;
-        gst_structure_get_int(st, "width", &w);
-        gst_structure_get_int(st, "height", &h);
-        const gchar* fmt = gst_structure_get_string(st, "format");
-
-        if (w != cap_width || h != cap_height) {
-            std::cerr << "[GST NVMM TEST] Unexpected resolution " << w << "x" << h
-                      << " (expected " << cap_width << "x" << cap_height << ")\n";
-        }
-
-        GstBuffer* buffer = gst_sample_get_buffer(sample);
-        GstMapInfo map;
-        if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-            std::cerr << "[GST NVMM TEST] Failed to map buffer\n";
-            gst_sample_unref(sample);
-            break;
-        }
-
-        // map.data is NvBufSurface* because memory:NVMM
-        NvBufSurface* surf = reinterpret_cast<NvBufSurface*>(map.data);
-
-        // ---- GPU path: RGBA (NVMM) -> BGR in d_bgr ----
-        if (!upload_nvmm_rgba_to_d_bgr(surf, 0,
-                                       d_bgr,
-                                       cap_width, cap_height,
-                                       gst_stream)) {
-            std::cerr << "[GST NVMM TEST] upload_nvmm_rgba_to_d_bgr failed\n";
-        }
-
-        // Debug: download from d_bgr to show it
-        cudaMemcpyAsync(dbg_frame.data,
-                        d_bgr,
-                        static_cast<size_t>(cap_width) * cap_height * 3,
-                        cudaMemcpyDeviceToHost,
-                        gst_stream);
-        cudaStreamSynchronize(gst_stream);
-        cv::imshow("GST_NVMM_TEST_FRAME", dbg_frame);
-
-        gst_buffer_unmap(buffer, &map);
-        gst_sample_unref(sample);
-
-        int key = cv::waitKey(1);
-        if (key == 27) { // ESC
-            running = false;
-        }
-
-        if ((frame_idx % 30) == 0) {
-            std::cout << "[GST NVMM TEST] Frame " << frame_idx
-                      << " | " << w << "x" << h
-                      << " | format=" << (fmt ? fmt : "unknown") << "\n";
-        }
-        ++frame_idx;
-    }
-
-    cudaStreamSynchronize(gst_stream);
-    cudaStreamDestroy(gst_stream);
-
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    gst_object_unref(sink);
-    gst_object_unref(pipeline);
-    cv::destroyWindow("GST_NVMM_TEST_FRAME");
-    cudaFree(d_bgr);
-    std::cout << "[GST NVMM TEST] Done. Exiting before full pipeline.\n";
-
-    // TEMP:  exit here.
-    // Next wire this into threaded pipeline
-    return 0;
-
-
-
 
     // ----------------------------- MEMORY ALLOCATIONS ----------------------------- //
-#if 0
-    // Allocate pinned memory for the frame data
-    uchar* pinned_frame_data = nullptr;
-    cudaHostAlloc((void**)&pinned_frame_data, num_cameras * pinned_size, cudaHostAllocDefault);
+
+    // OLD: Allocate pinned memory for the frame data 
+    // uchar* pinned_frame_data = nullptr;
+    // cudaHostAlloc((void**)&pinned_frame_data, num_cameras * frame_bytes, cudaHostAllocDefault);
+
+    // GPU buffer for RGBA(NVMM) -> BGR distorted frames
+    unsigned char* d_bgr_raw = nullptr;
+    cudaMalloc(&d_bgr_raw, frame_bytes * num_cameras);
+
+    // Device buffer for undistorted BGR frames
+    unsigned char* d_bgr_undistorted = nullptr;
+    cudaMalloc(&d_bgr_undistorted, frame_bytes * num_cameras);
 
     // Initialize yolo BGR image preprocessing buffer
-    uchar* d_bgr = nullptr;
-    cudaMalloc(&d_bgr, num_cameras * pinned_size);
+    // uchar* d_bgr = nullptr;
+    // cudaMalloc(&d_bgr, num_cameras * pinned_size);
 
     // Device yolo resized image preprocessing buffer
     uchar* d_resized = nullptr;
@@ -697,7 +400,7 @@ int main() {
 
     // Device classifier bbox crop buffer, one crop per detection
     unsigned char* d_cls_crop   = nullptr;
-    cudaMalloc(&d_cls_crop, pinned_size * CLS_MAX_BATCH);
+    cudaMalloc(&d_cls_crop, frame_bytes * CLS_MAX_BATCH);
 
     // Device classifier squared bbox buffer, one square per detection
     const int maxSquare  = std::max(cap_width, cap_height);
@@ -716,8 +419,9 @@ int main() {
     ActionVis* h_vis = nullptr;
     cudaMallocHost(&h_vis, CLS_MAX_BATCH * sizeof(ActionVis));
 
-    //cudaEvent_t ev_cls_probs_ready; // to know when the D2H finished
-    //cudaEventCreateWithFlags(&ev_cls_probs_ready, cudaEventDisableTiming);
+    // event to signal frame readyness
+    cudaEvent_t ev_frame_ready; 
+    cudaEventCreateWithFlags(&ev_frame_ready, cudaEventDisableTiming);
 
 
     // --------------------------------- TESTING SPACE ------------------------------- //
@@ -753,26 +457,37 @@ int main() {
 
     // -------------------------------- START THREADS -------------------------------- //
 
-    std::thread t_frame_capture(frame_capture_thread, std::ref(cap), cap_width, cap_height);
+    std::thread t_frame_capture(
+        frame_capture_thread,
+        sink,
+        cap_width,
+        cap_height,
+        num_cameras,
+        d_bgr_raw,
+        d_bgr_undistorted,
+        gst_stream,
+        ev_frame_ready
+    );
 
     std::thread t_inference;
-
     if (clsIO.outType == nvinfer1::DataType::kFLOAT) {
-        t_inference = std::thread(inference_thread,
-            pinned_frame_data, d_bgr, d_resized,
-            yolo_engine_img_width, yolo_engine_img_height, cap_width, cap_height,
-            scaleX, scaleY, pinned_size,
+        t_inference = std::thread(
+            inference_thread_full_gpu,
+            d_bgr_undistorted, d_resized,
+            yolo_engine_img_width, yolo_engine_img_height,
+            cap_width, cap_height,
+            scaleX, scaleY, frame_bytes,
             stream1, stream2,
             yolo_num_anchors, conf_thresh, iou_thresh,
-            d_final, d_dets, d_compacted, d_mask,
+            d_final, d_dets, d_compacted, d_mask, 
             d_count_compact, d_count_final, h_count_final,
             yoloIO, clsIO,
-            /* act cls */
-            maxSquare, cls_img_width, cls_img_height,
+            maxSquare,
+            cls_img_width, cls_img_height,
             d_cls_crop, d_cls_square, d_cls_bgr96, d_cls_params,
-            d_vis, h_vis, 
-            /* multi stream */
-            num_cameras
+            d_vis, h_vis,
+            num_cameras,
+            ev_frame_ready
         );
     } else {
         std::cout<<"\n[ERROR]\nUnexpected exception!\n->the output of the action classifier is fp16";
@@ -816,19 +531,40 @@ int main() {
     std::cout << "\nStopping and starting cleanup...\n";
     //cam.stop();
     //cam.closeDevice();
+    // gst
     cv::destroyAllWindows();
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(sink);
+    gst_object_unref(pipeline);
+    // streams 
     cudaStreamDestroy(stream1);
     cudaStreamDestroy(stream2);
-    cudaFreeHost(pinned_frame_data);
+    cudaStreamDestroy(gst_stream);
+    // events
+    cudaEventDestroy(ev_frame_ready);
+    // memory
+    // cudaFreeHost(pinned_frame_data);
     cudaFreeHost(h_count_final);
     cudaFree(yoloBuffers[inputIndex]); 
     cudaFree(yoloBuffers[outputIndex]);
-    cudaFree(d_bgr);
+    cudaFree(clsBuffers[clsInputIndex]);
+    cudaFree(clsBuffers[clsOutputIndex]);
+    cudaFree(d_bgr_raw);
+    cudaFree(d_bgr_undistorted);
     cudaFree(d_final);
     cudaFree(d_dets);
     cudaFree(d_compacted);
     cudaFree(d_count_final);
     cudaFree(d_mask);
+    cudaFree(d_count_compact);
+    cudaFree(d_resized);
+    cudaFree(d_cls_crop);
+    cudaFree(d_cls_square);
+    cudaFree(d_cls_bgr96);
+    cudaFree(d_cls_params);
+    cudaFree(d_vis);
+    cudaFreeHost(h_vis);
+    // engines and contexts
     context->destroy();
     clsContext->destroy();
     engine->destroy();
@@ -836,7 +572,7 @@ int main() {
     runtime->destroy();
     std::cout << "->cleanup complete\n\n";
 
-#endif
+
 
     return 0;
 
