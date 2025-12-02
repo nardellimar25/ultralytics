@@ -165,21 +165,21 @@ set(SRC_DIR   ${PROJ_ROOT}/src)
 
 include_directories(
   ${INC_DIR}
-  ${INC_DIR}/cuda
-  ${INC_DIR}/yolo
   ${INC_DIR}/action
-  ${INC_DIR}/io
-  ${INC_DIR}/engine
+  ${INC_DIR}/cuda
+  ${INC_DIR}/cuda/kernels
+  ${INC_DIR}/cuda/threads
   ${INC_DIR}/cuda_frame_decode
+  ${INC_DIR}/engine
+  ${INC_DIR}/io
+  ${INC_DIR}/yolo
+
   ${OpenCV_INCLUDE_DIRS}
   ${TRT_INCLUDE_DIR}
   ${GSTREAMER_INCLUDE_DIRS}        
   ${JETSON_MMAPI_INCLUDE}  
   /usr/local/cuda/include
 )
-
-# Separate CUDA frame decoder module includes (if present)
-include_directories(${PROJ_ROOT}/src/cuda_frame_decode)
 
 # ------------------------------------------------------------
 # Sources
@@ -197,15 +197,21 @@ set(SOURCES
   ${SRC_DIR}/action/cuda_action_preprocess.cu
   ${SRC_DIR}/action/cuda_action_postprocess.cu
 
-  # shared cuda infra
-  ${SRC_DIR}/cuda/cuda_kernels.cu
-  ${SRC_DIR}/cuda/cuda_threads.cu
+  # CUDA gpu kernels & threads
+  ${SRC_DIR}/cuda/kernels/cls_kernels.cu
+  ${SRC_DIR}/cuda/kernels/cuda_kernels.cu
+  ${SRC_DIR}/cuda/kernels/frame_kernels.cu
+  ${SRC_DIR}/cuda/kernels/yolo_kernels.cu
+  ${SRC_DIR}/cuda/threads/cuda_threads_capture.cu
+  ${SRC_DIR}/cuda/threads/cuda_threads_inference.cu
 
-  # io
+  # io TODO: delete old v4l2 read camera
   ${SRC_DIR}/io/v4l2_mmap_camera.cpp
 
-  # cuda frame decode module (if present)
+  # cuda frame decode/nvbufsurface
   ${PROJ_ROOT}/src/cuda_frame_decode/cuda_mjpeg_decode.cu
+  ${PROJ_ROOT}/src/cuda_frame_decode/cuda_undistort.cu
+  ${PROJ_ROOT}/src/cuda_frame_decode/cuda_nvmm_egl_upload.cu
 )
 
 # ------------------------------------------------------------
