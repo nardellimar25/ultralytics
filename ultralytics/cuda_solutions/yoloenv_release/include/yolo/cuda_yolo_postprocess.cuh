@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-#include "cuda_detection_struct.h"
+#include "cuda_structs.cuh"
 
 // Runs postprocessing on GPU: filter + NMS
 void yolo_postprocess_gpu(
