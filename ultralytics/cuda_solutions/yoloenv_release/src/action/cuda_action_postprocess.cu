@@ -3,8 +3,8 @@
 #include <iostream>
 
 #include "cuda_action_postprocess.cuh"
-#include "cuda_kernels.cuh"
-
+#include "kernels/cuda_kernels.cuh"
+#include "cuda_structs.cuh"
 
 // Postprocess function for the action classifier
 void action_cls_postprocess_gpu_batched(
