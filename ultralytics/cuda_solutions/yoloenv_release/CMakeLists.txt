@@ -206,10 +206,9 @@ set(SOURCES
   ${SRC_DIR}/cuda/threads/cuda_threads_inference.cu
 
   # io TODO: delete old v4l2 read camera
-  ${SRC_DIR}/io/v4l2_mmap_camera.cpp
+  ${SRC_DIR}/io/debug_vis.cu
 
   # cuda frame decode/nvbufsurface
-  ${PROJ_ROOT}/src/cuda_frame_decode/cuda_mjpeg_decode.cu
   ${PROJ_ROOT}/src/cuda_frame_decode/cuda_undistort.cu
   ${PROJ_ROOT}/src/cuda_frame_decode/cuda_nvmm_egl_upload.cu
 )
