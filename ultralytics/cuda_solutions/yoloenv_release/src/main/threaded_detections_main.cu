@@ -1,6 +1,8 @@
-// assuming yolov8s.engine extracted from yolov8s.onnx generated with nms=False
+// ================================================================================ //
+// engine files must be extracted on the same architecture as the target deployment //
+// ================================================================================ //
 #if !defined(__aarch64__)
-#error "This build of yolodetector is Jetson-only (aarch64). Use the other branch for desktop."
+#error "This build of yolodetector is Jetson-only (aarch64). Use the other branch from git."
 #endif
 
 #include <fstream>
@@ -76,7 +78,7 @@ int main() {
     std::cout << "Permission warning fix:   sudo chmod 700 /run/user/1000" << "\n\n\n";
 
     // TEMP: number of cameras hard coded
-    int num_cameras = 1;
+    int num_cameras = 3;
 
     #if defined(__aarch64__)
     // Initialize CUDA Driver API for CUDA-EGL interop
@@ -162,8 +164,8 @@ int main() {
 
     // Initialize yolo engine buffers
     void* yoloBuffers[2] = {nullptr, nullptr};
-    cudaMalloc(&yoloBuffers[inputIndex],  num_cameras * static_cast<size_t>(yolo_inputSize)  * elemSize(inType));
-    cudaMalloc(&yoloBuffers[outputIndex], num_cameras * static_cast<size_t>(yolo_outputSize) * elemSize(outType));
+    cudaMalloc(&yoloBuffers[inputIndex],  static_cast<size_t>(yolo_inputSize)  * elemSize(inType));
+    cudaMalloc(&yoloBuffers[outputIndex], static_cast<size_t>(yolo_outputSize) * elemSize(outType));
 
     // Build YOLO EngineIO struct
     EngineIO yoloIO;
@@ -176,24 +178,6 @@ int main() {
     yoloIO.inElems  = static_cast<size_t>(yolo_inputSize);  
     yoloIO.outElems = static_cast<size_t>(yolo_outputSize);  
 
-    // check dimensions set inside context
-    /*
-    std::cout << "\n[YOLO engine after setBindingDimensions]\n";
-    std::cout << "Input dims (ctx): ";
-    for (int i = 0; i < inputDimsCtx.nbDims; ++i) {
-        std::cout << inputDimsCtx.d[i];
-        if (i < inputDimsCtx.nbDims - 1) std::cout << "x";
-    }
-    std::cout << std::endl;
-    std::cout << "Output dims (ctx): ";
-    for (int i = 0; i < outputDimsCtx.nbDims; ++i) {
-        std::cout << outputDimsCtx.d[i];
-        if (i < outputDimsCtx.nbDims - 1) std::cout << "x";
-    }
-    std::cout << std::endl;
-
-    //return -1;
-    */
 
     // -------------------------- ACTION CLASSIFIER ENGINE -------------------------- //
 
@@ -221,7 +205,7 @@ int main() {
 
     IExecutionContext* clsContext = clsEngine->createExecutionContext();
 
-    // === Print what TRT actually has ===
+    // Print what TRT actually has
     //dumpBindings(clsEngine, "ACTION CLS engine");
 
     int clsInputIndex  = clsEngine->getBindingIndex("gray_images_input");
@@ -279,83 +263,121 @@ int main() {
     clsIO.outElems = static_cast<size_t>(cls_outputSize);
 
 
-    // ----------------------------- VIDEO CAPTURE SETUP (Gstreamer)----------------------------- //
+    // ----------------------------- MULTI CAMERA VIDEO CAPTURE SETUP (Gstreamer)----------------------------- //
 
-    std::cout << "\n[GST NVMM TEST] Opening camera via raw GStreamer (nvarguscamerasrc, NVMM RGBA)...\n";
-
-    gst_init(nullptr, nullptr);
-
-    // Pure NVMM pipeline: NV12 -> nvvidconv -> RGBA (NVMM) -> appsink
-    const char* pipeline_desc =
-        "nvarguscamerasrc sensor-id=0 bufapi-version=true ! "
-        "video/x-raw(memory:NVMM), width=(int)1920, height=(int)1080, framerate=30/1, format=NV12 ! "
-        "nvvidconv flip-method=0 ! "
-        "video/x-raw(memory:NVMM), format=RGBA ! "
-        "appsink name=sink drop=true max-buffers=1 sync=false";
-
-    GError* error = nullptr;
-    GstElement* pipeline = gst_parse_launch(pipeline_desc, &error);
-    if (!pipeline) {
-        std::cerr << "[GST NVMM TEST] Failed to create pipeline: "
-                  << (error ? error->message : "unknown error") << "\n";
-        if (error) g_error_free(error);
-        return -1;
-    }
-
-    GstElement* sink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
-    if (!sink) {
-        std::cerr << "[GST NVMM TEST] Failed to get appsink by name\n";
-        gst_object_unref(pipeline);
-        return -1;
-    }
-
-    gst_app_sink_set_emit_signals(GST_APP_SINK(sink), FALSE);
-    gst_app_sink_set_drop(GST_APP_SINK(sink), TRUE);
-    gst_app_sink_set_max_buffers(GST_APP_SINK(sink), 1);
-
-    GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
-        std::cerr << "[GST NVMM TEST] Failed to set pipeline to PLAYING\n";
-        gst_object_unref(sink);
-        gst_object_unref(pipeline);
-        return -1;
-    }
-
-    std::cout << "[GST NVMM TEST] Pipeline running, grabbing a few frames...\n";
-
-    // For now fix the capture size to what we requested
+    // Capture size
     int cap_width    = 1920;
     int cap_height   = 1080;
-    int cap_channels = 3;   // final BGR
-    //size_t pinned_size = static_cast<size_t>(cap_width) * cap_height * cap_channels * sizeof(uchar);
+    int cap_channels = 3;
     size_t frame_bytes = static_cast<size_t>(cap_width) * cap_height * cap_channels;
 
-    std::cout << "[CAMERA SETTINGS]\n";
+    std::cout << "\n[CAMERA SETTINGS]\n";
     std::cout << "Resolution: " << cap_width << "x" << cap_height << "\n";
-    std::cout << "Channels:   " << cap_channels << " (BGR, stored in d_bgr)\n\n";
+    std::cout << "Channels:   " << cap_channels << " (BGR)\n";
 
-    // Small CUDA stream just for frame caputure thread
-    cudaStream_t gst_stream;
-    cudaStreamCreate(&gst_stream);
+    std::cout << "\n[GST NVMM]\nInitializing GStreamer...\n";
+    // Init GStreamer once
+    gst_init(nullptr, nullptr);
+    std::cout << "->GStreamer initialized successfully\n";
+
+    // One pipeline + appsink per camera
+    std::vector<GstElement*> pipelines(num_cameras, nullptr);
+    std::vector<GstElement*> sinks(num_cameras, nullptr);
+
+    std::cout << "\nCreating and starting pipelines for " << num_cameras << " cameras...\n";
+
+    for (int cam = 0; cam < num_cameras; ++cam) {
+
+        // Build a pipeline string with the right sensor-id and a unique sink name
+        std::ostringstream oss;
+        oss  << "nvarguscamerasrc sensor-id=" << cam << " ! "
+            << "video/x-raw(memory:NVMM), width=(int)" << cap_width
+            << ", height=(int)" << cap_height
+            << ", framerate=30/1, format=NV12 ! "
+            << "nvvidconv flip-method=0 ! "
+            << "video/x-raw(memory:NVMM), format=RGBA ! "
+            << "appsink name=sink" << cam
+            << " drop=true max-buffers=1 sync=false";
+
+        std::string pipeline_desc = oss.str();
+        std::cout << "\nCreating pipeline for camera " << cam
+                << " with desc:\n  " << pipeline_desc << "\n";
+
+        GError* error = nullptr;
+        pipelines[cam] = gst_parse_launch(pipeline_desc.c_str(), &error);
+        if (!pipelines[cam]) {
+            std::cerr << "->failed to create pipeline for camera " << cam
+                    << ": " << (error ? error->message : "unknown error") << "\n";
+            if (error) g_error_free(error);
+
+            // Cleanup already-created pipelines before returning
+            for (int j = 0; j < cam; ++j) {
+                if (pipelines[j]) {
+                    gst_element_set_state(pipelines[j], GST_STATE_NULL);
+                    gst_object_unref(pipelines[j]);
+                }
+            }
+            return -1;
+        }
+
+        // Get the appsink by its unique name
+        std::string sink_name = "sink" + std::to_string(cam);
+        sinks[cam] = gst_bin_get_by_name(GST_BIN(pipelines[cam]), sink_name.c_str());
+        if (!sinks[cam]) {
+            std::cerr << "[GST NVMM TEST] Failed to get appsink '" << sink_name
+                    << "' for camera " << cam << "\n";
+            gst_object_unref(pipelines[cam]);
+            pipelines[cam] = nullptr;
+
+            for (int j = 0; j < cam; ++j) {
+                if (pipelines[j]) {
+                    gst_element_set_state(pipelines[j], GST_STATE_NULL);
+                    gst_object_unref(pipelines[j]);
+                }
+            }
+            return -1;
+        }
+
+        gst_app_sink_set_emit_signals(GST_APP_SINK(sinks[cam]), FALSE);
+        gst_app_sink_set_drop(GST_APP_SINK(sinks[cam]), TRUE);
+        gst_app_sink_set_max_buffers(GST_APP_SINK(sinks[cam]), 1);
+
+        GstStateChangeReturn ret = gst_element_set_state(pipelines[cam], GST_STATE_PLAYING);
+        if (ret == GST_STATE_CHANGE_FAILURE) {
+            std::cerr << "->failed to set pipeline to PLAYING for camera " << cam << "\n";
+            gst_object_unref(sinks[cam]);
+            gst_object_unref(pipelines[cam]);
+            sinks[cam]     = nullptr;
+            pipelines[cam] = nullptr;
+
+            for (int j = 0; j < cam; ++j) {
+                if (pipelines[j]) {
+                    gst_element_set_state(pipelines[j], GST_STATE_NULL);
+                    gst_object_unref(pipelines[j]);
+                }
+            }
+            return -1;
+        }
+
+        std::cout << "->pipeline running for camera " << cam << "\n";
+
+    }
+
+    std::cout << "\nAll pipelines running, grabbing frames...\n";
+
 
 
     // ----------------------------- MEMORY ALLOCATIONS ----------------------------- //
 
-    // OLD: Allocate pinned memory for the frame data 
-    // uchar* pinned_frame_data = nullptr;
-    // cudaHostAlloc((void**)&pinned_frame_data, num_cameras * frame_bytes, cudaHostAllocDefault);
 
     // GPU buffer for RGBA(NVMM) -> BGR distorted frames
     unsigned char* d_bgr_raw = nullptr;
     cudaMalloc(&d_bgr_raw, frame_bytes * num_cameras);
+    cudaMemset(d_bgr_raw, 0, frame_bytes * num_cameras);
 
     // Device buffer for undistorted BGR frames
     unsigned char* d_bgr_undistorted = nullptr;
     cudaMalloc(&d_bgr_undistorted, frame_bytes * num_cameras);
-
-    // Initialize yolo BGR image preprocessing buffer
-    // uchar* d_bgr = nullptr;
-    // cudaMalloc(&d_bgr, num_cameras * pinned_size);
 
     // Device yolo resized image preprocessing buffer
     uchar* d_resized = nullptr;
@@ -390,9 +412,10 @@ int main() {
     cudaHostAlloc(&h_count_final, sizeof(int), cudaHostAllocDefault);
 
     // Initialize CUDA streams
-    cudaStream_t stream1, stream2;
+    cudaStream_t stream1, gst_stream, stream2;
     cudaStreamCreate(&stream1);
-    cudaStreamCreate(&stream2);
+    // cudaStreamCreate(&stream2);
+    cudaStreamCreate(&gst_stream);
 
     // Device classifier params from yolo bbox buffer
     ClsDevParams* d_cls_params = nullptr;
@@ -449,30 +472,36 @@ int main() {
     // ------------------------------ SHARED VAR INITs ------------------------------ //
 
     {
-    std::lock_guard<std::mutex> lk(frame_mutex);
-    frame_back.create(cap_height, cap_width, CV_8UC3);
-    frame_front.create(cap_height, cap_width, CV_8UC3);
+        std::lock_guard<std::mutex> lk(frame_mutex);
+        int vis_width  = cap_width * num_cameras;
+        int vis_height = cap_height;
+
+        frame_back.create(vis_height, vis_width, CV_8UC3);
+        frame_front.create(vis_height, vis_width, CV_8UC3);
     }
 
 
     // -------------------------------- START THREADS -------------------------------- //
 
+    // Start frame capture thread
     std::thread t_frame_capture(
-        frame_capture_thread,
-        sink,
+        multistream_frame_capture_thread,
+        sinks.data(),       
+        num_cameras,
         cap_width,
         cap_height,
-        num_cameras,
         d_bgr_raw,
         d_bgr_undistorted,
         gst_stream,
-        ev_frame_ready
+        ev_frame_ready,
+        pipelines.data() // for debugging the error states
     );
 
+    // Start inference thread
     std::thread t_inference;
     if (clsIO.outType == nvinfer1::DataType::kFLOAT) {
         t_inference = std::thread(
-            inference_thread_full_gpu,
+            multi_stream_inference_thread_full_gpu,
             d_bgr_undistorted, d_resized,
             yolo_engine_img_width, yolo_engine_img_height,
             cap_width, cap_height,
@@ -491,6 +520,7 @@ int main() {
         );
     } else {
         std::cout<<"\n[ERROR]\nUnexpected exception!\n->the output of the action classifier is fp16";
+        keep_running = false;
     }
 
     
@@ -529,16 +559,31 @@ int main() {
     // ---------------------------------- CLEANUP ----------------------------------- //
     
     std::cout << "\nStopping and starting cleanup...\n";
-    //cam.stop();
-    //cam.closeDevice();
-    // gst
+
+    // opencv
     cv::destroyAllWindows();
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    gst_object_unref(sink);
-    gst_object_unref(pipeline);
+    // gst
+    for (int cam = 0; cam < num_cameras; ++cam) {
+        if (pipelines[cam]) {
+            gst_element_send_event(pipelines[cam], gst_event_new_eos());
+        }
+    }
+    for (int cam = 0; cam < num_cameras; ++cam) {
+        if (pipelines[cam]) {
+            gst_element_set_state(pipelines[cam], GST_STATE_NULL);
+        }
+    }
+    for (int cam = 0; cam < num_cameras; ++cam) {
+        if (sinks[cam]) {
+            gst_object_unref(sinks[cam]);
+        }
+        if (pipelines[cam]) {
+            gst_object_unref(pipelines[cam]);
+        }
+    }
     // streams 
     cudaStreamDestroy(stream1);
-    cudaStreamDestroy(stream2);
+    // cudaStreamDestroy(stream2);
     cudaStreamDestroy(gst_stream);
     // events
     cudaEventDestroy(ev_frame_ready);
