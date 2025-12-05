@@ -28,19 +28,7 @@
 #include <cuda.h>
 #include <cudaEGL.h>
 #include "nvbufsurface.h"
-
-
-// --- for the test ---
-
-// #include <sys/stat.h>
-// #include <sys/types.h>
-// #include <unistd.h>
-// #include <errno.h>
-// #include <iomanip>
-// #include <fstream>
-// #include <sstream>
-
-// --- for the test ---        
+      
 
 #include "threads/cuda_threads.cuh"
 #include "engine_io.hpp"
@@ -445,13 +433,6 @@ int main() {
     // event to signal frame readyness
     cudaEvent_t ev_frame_ready; 
     cudaEventCreateWithFlags(&ev_frame_ready, cudaEventDisableTiming);
-
-
-    // --------------------------------- TESTING SPACE ------------------------------- //
-
-
-
-    // ----------------------------- END OF TESTING SPACE ---------------------------- //
 
     
     // ---------------------------- DEBUG INITIALIZATIONS ---------------------------- //
