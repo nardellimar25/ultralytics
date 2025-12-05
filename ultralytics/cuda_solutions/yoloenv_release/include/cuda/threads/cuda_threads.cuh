@@ -41,6 +41,21 @@ void frame_capture_thread(
 );
 
 
+// ------------------------------ MULTI-STREAM FRAME CAPTURE THREAD ------------------------------ //
+
+void multistream_frame_capture_thread(
+    GstElement**  sinks,             
+    int           num_cameras,
+    int           cap_width,
+    int           cap_height,
+    unsigned char* d_bgr_raw,        
+    unsigned char* d_bgr_undistorted, 
+    cudaStream_t  gst_stream,
+    cudaEvent_t   ev_frame_ready,
+    GstElement**  pipelines
+);
+
+
 // ------------------------------ INFERENCE THREAD ------------------------------ //
 
 void inference_thread_full_gpu(
@@ -60,4 +75,26 @@ void inference_thread_full_gpu(
     ActionVis* d_vis, ActionVis* h_vis,
     int num_cameras,
     cudaEvent_t ev_frame_ready   
+);
+
+
+// ------------------------------ MULTI-STREAM INFERENCE THREAD ------------------------------ //
+
+void multi_stream_inference_thread_full_gpu(
+    unsigned char* d_bgr_undistorted, unsigned char* d_resized,
+    int yolo_engine_img_width, int yolo_engine_img_height,
+    int cap_width, int cap_height,
+    float scaleX, float scaleY, size_t frame_bytes,
+    cudaStream_t stream1, cudaStream_t stream2,
+    int num_anchors, float conf_thresh, float iou_thresh,
+    Detection* d_final, Detection* d_dets, Detection* d_compacted,
+    int* d_mask, int* d_count_compact, int* d_count_final, int* h_count_final,
+    const EngineIO& yoloIO, const EngineIO& clsIO,
+    int maxSquare,
+    int cls_engine_img_width, int cls_engine_img_height,
+    unsigned char* d_cls_crop, unsigned char* d_cls_square, unsigned char* d_cls_bgr96,
+    ClsDevParams* d_cls_params,
+    ActionVis* d_vis, ActionVis* h_vis,
+    int num_cameras,
+    cudaEvent_t ev_frame_ready
 );
