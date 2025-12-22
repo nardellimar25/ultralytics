@@ -14,16 +14,37 @@ void Logger::log(Severity severity, const char* msg) noexcept {
     if (severity <= Severity::kWARNING) std::cout << msg << std::endl;
 }
 
+// TODO : remove older version that created new runtime every time
+// ICudaEngine* loadEngine(const std::string& engineFile, IRuntime*& runtime) {
+//     std::ifstream file(engineFile, std::ios::binary);
+//     if (!file) throw std::runtime_error("Failed to open engine file");
+//     file.seekg(0, std::ios::end);
+//     size_t size = file.tellg();
+//     file.seekg(0);
+//     std::vector<char> buffer(size);
+//     file.read(buffer.data(), size);
+//     runtime = createInferRuntime(gLogger);
+//     return runtime->deserializeCudaEngine(buffer.data(), size);
+// }
 
+// Function to load a TensorRT engine from file
 ICudaEngine* loadEngine(const std::string& engineFile, IRuntime*& runtime) {
     std::ifstream file(engineFile, std::ios::binary);
     if (!file) throw std::runtime_error("Failed to open engine file");
+
     file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
+    size_t size = (size_t)file.tellg();
     file.seekg(0);
+
     std::vector<char> buffer(size);
     file.read(buffer.data(), size);
-    runtime = createInferRuntime(gLogger);
+
+    // Create runtime if not already created
+    if (!runtime) {
+        runtime = createInferRuntime(gLogger);
+        if (!runtime) throw std::runtime_error("Failed to create TensorRT runtime");
+    }
+
     return runtime->deserializeCudaEngine(buffer.data(), size);
 }
 

@@ -7,6 +7,7 @@
 
 #include "cuda_nvmm_egl_upload.cuh"
 
+// TODO : use the one in the helper file
 // Local helper for CUDA driver errors
 static void checkCu(CUresult r, const char* msg)
 {
@@ -19,7 +20,7 @@ static void checkCu(CUresult r, const char* msg)
     }
 }
 
-// Very simple RGBA -> BGR copy (no resize yet, 1:1 copy)
+// Very simple RGBA -> BGR copy (no resize, 1:1 copy)
 __global__ void rgba_to_bgr_linear_kernel(
     const unsigned char* __restrict__ src,
     int srcPitch,        // in bytes

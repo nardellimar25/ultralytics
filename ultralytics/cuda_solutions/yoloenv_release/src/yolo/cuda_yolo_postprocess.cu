@@ -25,18 +25,21 @@ void yolo_postprocess_gpu(
     cudaEvent_t ev_count_final,
     int num_cameras
 ) {
+
+    // TODO : move as parameter
+    int max_dets = 100;
+
     // Reset intermediate detection counter on device
     //cudaMemsetAsync(d_count_compact, 0, sizeof(int));
     cudaMemsetAsync(d_count_compact, 0, sizeof(int), stream);
     // Reset final detection counter on device
-    cudaMemsetAsync(d_count_final, 0, sizeof(int));
+    cudaMemsetAsync(d_count_final, 0, sizeof(int), stream);
     // Reset detections on device
     /* TODO : needs update to match max detections */
-    cudaMemsetAsync(d_final, 0, 100 * sizeof(Detection), stream);
+    cudaMemsetAsync(d_final, 0, max_dets * sizeof(Detection), stream);
 
     // total anchors across the whole batch
     int tot_anchors = num_cameras * num_anchors;
-    int max_dets = 100;
 
     dim3 threads(256);
     dim3 blocks((tot_anchors + threads.x - 1) / threads.x);
@@ -118,23 +121,31 @@ void yolo_postprocess_gpu(
     cudaEvent_t ev_count_final,
     int num_cameras
 ) {
+
+    // TODO : pass as parameter
+    int max_dets = 64;
+    int pre_nms_topk = 256;
+
     // Reset intermediate detection counter on device
     cudaMemsetAsync(d_count_compact, 0, sizeof(int), stream);
     // Reset final detection counter on device
     cudaMemsetAsync(d_count_final, 0, sizeof(int), stream);
+
+    // TODO : check that downstream we only ready the exact number of detections
     // Reset detections on device
-    cudaMemsetAsync(d_final, 0, 100 * sizeof(Detection), stream);
+    // cudaMemsetAsync(d_final, 0, max_dets * sizeof(Detection), stream);
 
     // total anchors across the whole batch
     int tot_anchors = num_cameras * num_anchors;
-    int max_dets = 100;
 
     dim3 threads(256);
-    dim3 blocks((num_anchors + threads.x - 1) / threads.x);
-    size_t shared_mem_size = threads.x * sizeof(int);
+    dim3 blocks((tot_anchors + threads.x - 1) / threads.x);
+    // TODO : test without shared memory and see if smoother
+    // size_t shared_mem_size = threads.x * sizeof(int);
 
     // Filtering kernel
-    extract_detections_kernel_batched_half<<<blocks, threads, shared_mem_size, stream>>>(
+    // extract_detections_kernel_batched_half<<<blocks, threads, shared_mem_size, stream>>>(
+    extract_detections_kernel_batched_half<<<blocks, threads, 0, stream>>>(
         d_output,        
         num_cameras,              
         num_anchors,     
@@ -163,7 +174,7 @@ void yolo_postprocess_gpu(
                   << cudaGetErrorString(err) << std::endl;
     }
 
-    dim3 blocks_nms((num_anchors + threads.x - 1) / threads.x);
+    dim3 blocks_nms((pre_nms_topk + threads.x - 1) / threads.x);
 
     // Apply NMS kernel
     nms_kernel_final_output_batched<<<blocks_nms, threads, 0, stream>>>(
@@ -172,7 +183,7 @@ void yolo_postprocess_gpu(
         iou_thresh,
         d_final,             
         d_count_final,       
-        num_anchors,         
+        num_anchors,    // TODO : now is unused inside kernel, remove      
         max_dets,
         num_cameras
     );
@@ -186,6 +197,7 @@ void yolo_postprocess_gpu(
     cudaMemcpyAsync(h_count_final, d_count_final, sizeof(int), cudaMemcpyDeviceToHost, stream);
 
     // Mark exactly when the host may read *h_count_final
+
     cudaEventRecord(ev_count_final, stream);
     
     return;

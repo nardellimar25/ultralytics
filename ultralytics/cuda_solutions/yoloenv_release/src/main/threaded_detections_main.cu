@@ -1,6 +1,7 @@
 // ================================================================================ //
 // engine files must be extracted on the same architecture as the target deployment //
 // ================================================================================ //
+
 #if !defined(__aarch64__)
 #error "This build of yolodetector is Jetson-only (aarch64). Use the other branch from git."
 #endif
@@ -28,32 +29,24 @@
 #include <cuda.h>
 #include <cudaEGL.h>
 #include "nvbufsurface.h"
-      
 
 #include "threads/cuda_threads.cuh"
 #include "engine_io.hpp"
 #include "engine_debug_utils.h"
 #include "cuda_structs.cuh"
 #include "yolodetect.h"
+#include "threads/debug_snapshot.cuh"
+#include "cuda_helpers.cuh"
 
+// --- for the testing space ---
+
+// --- for the testing space ---        
 
 using namespace nvinfer1;
 
 
-// Simple CUDA driver error checker
-static void checkCu(CUresult r, const char* msg)
-{
-    if (r != CUDA_SUCCESS)
-    {
-        const char* errStr = nullptr;
-        cuGetErrorString(r, &errStr);
-        std::cerr << "[CUDA-EGL] " << msg << " failed: "
-                  << (errStr ? errStr : "unknown") << " (" << r << ")\n";
-    }
-}
 
-
-// ------------------------------ MAIN FUNCTION ------------------------------ //
+// --------------------------------- MAIN FUNCTION ---------------------------------- //
 
 int main() {
 
@@ -62,14 +55,16 @@ int main() {
     cudaProfilerStart(); 
 
     std::cout << "\n[REAL-TIME DETECTION AND ACTION CLASSIFICATION]\n\n";
-    std::cout << "\nTensorRT version:   " << NV_TENSORRT_MAJOR << "." << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH << "\n";
-    std::cout << "Permission warning fix:   sudo chmod 700 /run/user/1000" << "\n\n\n";
+    std::cout << "\nTensorRT version: "
+    << NV_TENSORRT_MAJOR << "." << NV_TENSORRT_MINOR << "." << NV_TENSORRT_PATCH << "\n";
+    // std::cout << "Permission warning fix:   sudo chmod 700 /run/user/1000" << "\n\n\n";
 
     // TEMP: number of cameras hard coded
     int num_cameras = 3;
+    std::cout << "\nNumber of cameras: " << num_cameras << "\n";
 
-    #if defined(__aarch64__)
     // Initialize CUDA Driver API for CUDA-EGL interop
+    #if defined(__aarch64__)
     CUresult cuRes = cuInit(0);
     if (cuRes != CUDA_SUCCESS) {
         checkCu(cuRes, "cuInit");
@@ -83,9 +78,12 @@ int main() {
     #define YOLO_ENGINE_PATH "engines/yolo.engine"
     #endif
 
+    std::cout << "\n[YOLO engine]\n";
+
     std::string yolo_engineFile = YOLO_ENGINE_PATH;
     if (yolo_engineFile.empty()) {
-        std::cerr << "Engine file path is empty. Please set correct ENGINE_PATH.\n";
+        std::cerr << "Yolo engine file path is empty.\n";
+        std::cerr << "Please set correct YOLO_ENGINE_PATH.\n";
         return -1;
     }
     std::cout << "Loading yolo engine from: " << yolo_engineFile << "...\n";
@@ -106,10 +104,10 @@ int main() {
     auto outType = engine->getTensorDataType("yolo_output");
 
     // Print engine info for yolo
-    std::cout << "\n[YOLO engine]\n";
     std::cout << "Engine name: " << engine->getName() << std::endl;
     std::cout << "Number of bindings: " << engine->getNbBindings() << std::endl;
-    std::cout << "Input index: " << inputIndex << ", Output index: " << outputIndex << std::endl;
+    std::cout << "Input index: " << inputIndex << std::endl;
+    std::cout << "Output index: " << outputIndex << std::endl;
     std::cout << "Input dims: ";
     for (int i = 0; i < inputDims.nbDims; ++i) {
         std::cout << inputDims.d[i];
@@ -135,18 +133,19 @@ int main() {
         std::cerr << "\n->yolo input dimensions not fully specified\n";
         return -1;
     }
-    // Read CONCRETE dims from CONTEXT
+    // Read concrete dims from CONTEXT
     nvinfer1::Dims inputDimsCtx  = context->getBindingDimensions(inputIndex);
     nvinfer1::Dims outputDimsCtx = context->getBindingDimensions(outputIndex);
 
     // Initialize based on yolo engine dimensions
-    const int yolo_engine_img_width     = inputDims.d[3];
-    const int yolo_engine_img_height    = inputDims.d[2];
-    const int yolo_num_anchors          = outputDims.d[2];
+    const int yolo_engine_img_width     = inputDimsCtx.d[3];
+    const int yolo_engine_img_height    = inputDimsCtx.d[2];
+    const int yolo_num_anchors          = outputDimsCtx.d[2];
     const int yolo_num_classes          = 80;
     const int max_final_detections      = 100;
     const int yolo_inputSize            = inputDimsCtx.d[0] * inputDimsCtx.d[1] * yolo_engine_img_height * yolo_engine_img_width;
     const int yolo_outputSize           = outputDimsCtx.d[0] * outputDimsCtx.d[1] * yolo_num_anchors;
+    
     // Get needed resized frame dimensions
     size_t yolo_engine_input_size       = yolo_engine_img_height * yolo_engine_img_width * 3;
 
@@ -167,26 +166,25 @@ int main() {
     yoloIO.outElems = static_cast<size_t>(yolo_outputSize);  
 
 
-    // -------------------------- ACTION CLASSIFIER ENGINE -------------------------- //
-
-    constexpr int CLS_MAX_BATCH = 64; // should match the number of the max batch size used during the engine extraction
-    constexpr int CLS_OUT = 3;
-    const size_t CLS_MAX_ELEMS = static_cast<size_t>(CLS_MAX_BATCH) * CLS_OUT;
+    // --------------------------- ACTION CLASSIFIER ENGINE -------------------------- //
 
     #ifndef ACTION_ENGINE_PATH
     #define ACTION_ENGINE_PATH "engines/cls.engine"
     #endif
 
+    std::cout << "\n[ACTION CLASSIFIER engine]\n";
+
     // Get action classifier engine file path
     std::string action_cls_engineFile = ACTION_ENGINE_PATH;
     if (action_cls_engineFile.empty()) {
-        std::cerr << "Engine file path is empty. Please set correct ACTION_ENGINE_PATH.\n";
+        std::cerr << "Action classifier engine file path is empty...\n";
+        std::cerr << "->please set correct ACTION_ENGINE_PATH.\n";
         return -1;
     }
-    std::cout << "Loading action classifier engine from: " << action_cls_engineFile << "...\n";
+    std::cout << "Loading act cls engine from: " << action_cls_engineFile << "...\n";
     ICudaEngine* clsEngine = loadEngine(action_cls_engineFile, runtime);
     if (!clsEngine) {
-        std::cerr << "Failed to load classifier engine at: " << action_cls_engineFile << "\n";
+        std::cerr << "Failed to load act cls engine at: " << action_cls_engineFile << "\n";
         return -1;
     }
     std::cout << "->action classifier engine loaded successfully\n";
@@ -204,7 +202,6 @@ int main() {
     auto clsOutType = clsEngine->getTensorDataType("action_cls_output");
 
     // Print engine info for action classifier
-    std::cout << "\n[ACTION CLS engine]\n";
     std::cout << "Engine name: " << clsEngine->getName() << std::endl;
     std::cout << "Number of bindings: " << clsEngine->getNbBindings() << std::endl;
     std::cout << "Input index: " << clsInputIndex << std::endl;
@@ -220,7 +217,12 @@ int main() {
     }
     std::cout << "\nInput dtype: "  << dtypeName(clsInType)  << "\n";
     std::cout << "Output dtype: " << dtypeName(clsOutType) << "\n";
-    std::cout << std::endl << std::endl;
+    std::cout << std::endl;
+
+    // Number of the max batch size used during the engine extraction
+    constexpr int CLS_MAX_BATCH = 64; 
+    // Number of output classes for the action classifier
+    constexpr int CLS_OUT = 3;
 
     // Initialize based on action classifier engine dimensions
     const int cls_batch       = CLS_MAX_BATCH;  
@@ -251,21 +253,29 @@ int main() {
     clsIO.outElems = static_cast<size_t>(cls_outputSize);
 
 
-    // ----------------------------- MULTI CAMERA VIDEO CAPTURE SETUP (Gstreamer)----------------------------- //
+    // ------------------------------- CAMERA SETTINGS ------------------------------- //
+
+    std::cout << "\n[CAMERA SETTINGS]\n";
 
     // Capture size
     int cap_width    = 1920;
     int cap_height   = 1080;
     int cap_channels = 3;
+    // Frame size in bytes
     size_t frame_bytes = static_cast<size_t>(cap_width) * cap_height * cap_channels;
 
-    std::cout << "\n[CAMERA SETTINGS]\n";
-    std::cout << "Resolution: " << cap_width << "x" << cap_height << "\n";
-    std::cout << "Channels:   " << cap_channels << " (BGR)\n";
+    std::cout << "->resolution: " << cap_width << "x" << cap_height << "\n";
+    std::cout << "->channels:   " << cap_channels << " (BGR)\n";
 
-    std::cout << "\n[GST NVMM]\nInitializing GStreamer...\n";
-    // Init GStreamer once
+
+    // ------------------------------- GSTREAMER SETUP ------------------------------- //
+
+    std::cout << "\n[GSTREAMER SETUP]\n";
+    std::cout << "Initializing GStreamer...\n";
+
+    // Init GStreamer once 
     gst_init(nullptr, nullptr);
+
     std::cout << "->GStreamer initialized successfully\n";
 
     // One pipeline + appsink per camera
@@ -276,7 +286,7 @@ int main() {
 
     for (int cam = 0; cam < num_cameras; ++cam) {
 
-        // Build a pipeline string with the right sensor-id and a unique sink name
+        // Pipeline description for each camera
         std::ostringstream oss;
         oss  << "nvarguscamerasrc sensor-id=" << cam << " ! "
             << "video/x-raw(memory:NVMM), width=(int)" << cap_width
@@ -288,8 +298,8 @@ int main() {
             << " drop=true max-buffers=1 sync=false";
 
         std::string pipeline_desc = oss.str();
-        std::cout << "\nCreating pipeline for camera " << cam
-                << " with desc:\n  " << pipeline_desc << "\n";
+        std::cout << "\nCreating pipeline for camera " << cam << " with desc:\n";
+        std::cout << pipeline_desc << "\n";
 
         GError* error = nullptr;
         pipelines[cam] = gst_parse_launch(pipeline_desc.c_str(), &error);
@@ -351,12 +361,15 @@ int main() {
 
     }
 
-    std::cout << "\nAll pipelines running, grabbing frames...\n";
+    std::cout << "\n->all pipelines running\n";
 
 
 
     // ----------------------------- MEMORY ALLOCATIONS ----------------------------- //
 
+    // TODO : add error checks after each cudaMalloc / cudaHostAlloc with checkCuda helper
+    std::cout << "\n[MEMORY ALLOCATIONS]\n";
+    std::cout << "Allocating GPU buffers...\n";
 
     // GPU buffer for RGBA(NVMM) -> BGR distorted frames
     unsigned char* d_bgr_raw = nullptr;
@@ -400,10 +413,11 @@ int main() {
     cudaHostAlloc(&h_count_final, sizeof(int), cudaHostAllocDefault);
 
     // Initialize CUDA streams
-    cudaStream_t stream1, gst_stream, stream2;
+    cudaStream_t stream1, gst_stream, stream2, stream_vis;
     cudaStreamCreate(&stream1);
-    // cudaStreamCreate(&stream2);
+    cudaStreamCreate(&stream2);
     cudaStreamCreate(&gst_stream);
+    cudaStreamCreate(&stream_vis); 
 
     // Device classifier params from yolo bbox buffer
     ClsDevParams* d_cls_params = nullptr;
@@ -434,8 +448,25 @@ int main() {
     cudaEvent_t ev_frame_ready; 
     cudaEventCreateWithFlags(&ev_frame_ready, cudaEventDisableTiming);
 
+    std::cout << "->GPU buffers allocated successfully\n";
+
+
+    // --------------------------------- TESTING SPACE ------------------------------- //
+
+    // std::cout << "\n[TESTING SPACE]\n";
+    // std::cout << "Testing started...\n\n";
+
+    // std::cout << "\n->testing complete\n";
+
+
+    // ----------------------------- END OF TESTING SPACE ---------------------------- //
+
     
+
     // ---------------------------- DEBUG INITIALIZATIONS ---------------------------- //
+
+    std::cout << "\n[DEBUG VISUALIZATION SETUP]\n";
+    std::cout << "Creating OpenCV windows and trackbars...\n";
 
     // Create OpenCV windows and trackbars for debugging
     cv::namedWindow("Detections with bbox", cv::WINDOW_AUTOSIZE);
@@ -449,20 +480,31 @@ int main() {
     float scaleX = static_cast<float>(cap_width) / yolo_engine_img_width;
     float scaleY = static_cast<float>(cap_height) / yolo_engine_img_height;
 
+    // NEW: initialize debug snapshot module
+    debug_snapshot_init(h_vis, CLS_MAX_BATCH);
 
-    // ------------------------------ SHARED VAR INITs ------------------------------ //
+    std::cout << "->OpenCV windows and trackbars created successfully\n";
 
-    {
-        std::lock_guard<std::mutex> lk(frame_mutex);
-        int vis_width  = cap_width * num_cameras;
-        int vis_height = cap_height;
 
-        frame_back.create(vis_height, vis_width, CV_8UC3);
-        frame_front.create(vis_height, vis_width, CV_8UC3);
-    }
+    // ------------------------------- SHARED VAR INITs ------------------------------ //
+
+    std::cout << "\n[SHARED VARIABLES SETUP]\n";
+    std::cout << "Initializing shared variables...\n";
+
+    // std::lock_guard<std::mutex> lk(frame_mutex);
+    int vis_width  = cap_width * num_cameras;
+    int vis_height = cap_height;
+
+    // Allocate space for the combined visualization frames
+    frame_back.create(vis_height, vis_width, CV_8UC3);
+    frame_front.create(vis_height, vis_width, CV_8UC3);
+    
+    std::cout << "->shared variables initialized successfully\n";
 
 
     // -------------------------------- START THREADS -------------------------------- //
+
+    std::cout << "\n[STARTING THREADS]\n";
 
     // Start frame capture thread
     std::thread t_frame_capture(
@@ -478,9 +520,26 @@ int main() {
         pipelines.data() // for debugging the error states
     );
 
+    std::cout << "->frame capture thread started successfully\n";
+
+    // NEW: Start debug/display-prep thread
+    std::thread t_debug_vis(
+        debug_vis_thread,
+        num_cameras,
+        cap_width,
+        cap_height,
+        stream_vis,  
+        d_bgr_undistorted,
+        frame_bytes,
+        ev_frame_ready
+    );
+
+    std::cout << "->debug visualization thread started successfully\n";
+
     // Start inference thread
     std::thread t_inference;
     if (clsIO.outType == nvinfer1::DataType::kFLOAT) {
+
         t_inference = std::thread(
             multi_stream_inference_thread_full_gpu,
             d_bgr_undistorted, d_resized,
@@ -499,13 +558,19 @@ int main() {
             num_cameras,
             ev_frame_ready
         );
+
     } else {
-        std::cout<<"\n[ERROR]\nUnexpected exception!\n->the output of the action classifier is fp16";
+
+        std::cout<<"\n[ERROR]\nUnexpected exception!\n";
+        std::cout << "->the output of the action classifier is fp16\n";
         keep_running = false;
+
     }
 
+    std::cout << "->inference thread started successfully\n";
+
     
-    // ---------------------------- MAIN DISPLAY LOOP ---------------------------- //
+    // ------------------------------ MAIN DISPLAY LOOP ------------------------------ //
     
     while (keep_running) {
 
@@ -518,9 +583,21 @@ int main() {
 
         // stop threads on ESC key
         if (cv::waitKey(1) == 27) {
+            std::cout << "\n\n[ESC KEY PRESSED]\nRequesting shutdown...\n";
+
             keep_running = false;       
             frame_ready.notify_all();   
-            break;                      
+
+            // NEW: Stop GStreamer pipelines to unblock gst_app_sink_pull_sample
+            for (int cam = 0; cam < num_cameras; ++cam) {
+                if (pipelines[cam]) {
+                    std::cout << "Setting pipeline " << cam << " to NULL...\n";
+                    gst_element_set_state(pipelines[cam], GST_STATE_NULL);
+                }
+            }
+
+            break;
+
         }
 
     }
@@ -528,6 +605,7 @@ int main() {
     // Wait for threads to finish
     t_frame_capture.join();
     t_inference.join();
+    t_debug_vis.join();
    
     // Ensure all operations are complete before cleanup
     cudaDeviceSynchronize();
@@ -537,39 +615,31 @@ int main() {
     cudaProfilerStop();
 
 
-    // ---------------------------------- CLEANUP ----------------------------------- //
+    // ----------------------------------- CLEANUP ----------------------------------- //
     
-    std::cout << "\nStopping and starting cleanup...\n";
+    std::cout << "\n[CLEANUP]\n";
+    std::cout << "Releasing resources...\n";
 
     // opencv
     cv::destroyAllWindows();
     // gst
     for (int cam = 0; cam < num_cameras; ++cam) {
         if (pipelines[cam]) {
-            gst_element_send_event(pipelines[cam], gst_event_new_eos());
-        }
-    }
-    for (int cam = 0; cam < num_cameras; ++cam) {
-        if (pipelines[cam]) {
             gst_element_set_state(pipelines[cam], GST_STATE_NULL);
         }
     }
     for (int cam = 0; cam < num_cameras; ++cam) {
-        if (sinks[cam]) {
-            gst_object_unref(sinks[cam]);
-        }
-        if (pipelines[cam]) {
-            gst_object_unref(pipelines[cam]);
-        }
+        if (sinks[cam]) gst_object_unref(sinks[cam]);
+        if (pipelines[cam]) gst_object_unref(pipelines[cam]);
     }
     // streams 
     cudaStreamDestroy(stream1);
-    // cudaStreamDestroy(stream2);
     cudaStreamDestroy(gst_stream);
+    cudaStreamDestroy(stream2);
+    cudaStreamDestroy(stream_vis);
     // events
     cudaEventDestroy(ev_frame_ready);
     // memory
-    // cudaFreeHost(pinned_frame_data);
     cudaFreeHost(h_count_final);
     cudaFree(yoloBuffers[inputIndex]); 
     cudaFree(yoloBuffers[outputIndex]);
@@ -596,9 +666,8 @@ int main() {
     engine->destroy();
     clsEngine->destroy();
     runtime->destroy();
+    
     std::cout << "->cleanup complete\n\n";
-
-
 
     return 0;
 

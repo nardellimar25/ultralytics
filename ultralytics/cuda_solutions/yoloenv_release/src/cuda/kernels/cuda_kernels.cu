@@ -1,4 +1,4 @@
-// src/kernels/cuda_kernels.cu
+
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
@@ -6,7 +6,8 @@
 #include "cuda_helpers.cuh"
 #include "cuda_structs.cuh"
 
-// TODO: remove old kernels below if not needed anymore
+// TODO: split into multiple files for better organization
+
 
 // -------------------------------- HELPER FUNCTIONS -------------------------------- //
 
