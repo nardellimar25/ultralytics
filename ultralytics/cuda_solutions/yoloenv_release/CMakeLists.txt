@@ -204,6 +204,11 @@ set(SOURCES
   ${SRC_DIR}/cuda/kernels/yolo_kernels.cu
   ${SRC_DIR}/cuda/threads/cuda_threads_capture.cu
   ${SRC_DIR}/cuda/threads/cuda_threads_inference.cu
+  ${SRC_DIR}/cuda/threads/cuda_threads_debug_vis.cu
+  # new: debug snapshot
+  ${SRC_DIR}/cuda/debug_snapshot.cu
+  # new : debug vis kernels
+  ${SRC_DIR}/cuda/kernels/debug_vis_kernels.cu
 
   # io TODO: delete old v4l2 read camera
   ${SRC_DIR}/io/debug_vis.cu
@@ -230,7 +235,7 @@ target_compile_definitions(yolodetector PRIVATE
 # // Debug visualization flags
 # // DEBUG_VIS | DEBUG_ONLY_FRAME
 # // 0 0 -> no window displayed
-# // 1 0 -> frame + bboxes + blur
+# // 1 0 -> frame + bboxes + (not added blur, yet)
 # // 1 1 -> only frame
 
 # Warnings
