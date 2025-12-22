@@ -1,5 +1,5 @@
-#ifndef CUDA_POSTPROCESS_CUH
-#define CUDA_POSTPROCESS_CUH
+#ifndef CUDA_YOLO_POSTPROCESS_CUH
+#define CUDA_YOLO_POSTPROCESS_CUH
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -41,4 +41,4 @@ void yolo_postprocess_gpu(
     int num_cameras
 );
 
-#endif // CUDA_POSTPROCESS_CUH
+#endif // CUDA_YOLO_POSTPROCESS_CUH

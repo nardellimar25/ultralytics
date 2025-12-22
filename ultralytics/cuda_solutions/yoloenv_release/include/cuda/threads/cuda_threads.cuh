@@ -23,22 +23,11 @@ extern std::mutex frame_mutex;
 extern std::mutex frame_copy_mutex;
 
 extern std::condition_variable frame_ready;
-extern std::atomic<bool> new_frame_available;
+
+// New: monotonically increasing frame counter published by capture thread
+extern std::atomic<uint64_t> g_frame_id;
+
 extern std::atomic<bool> keep_running;
-
-
-// ------------------------------ FRAME CAPTURE THREAD ------------------------------ //
-
-void frame_capture_thread(
-    GstElement*   sink,
-    int           cap_width,
-    int           cap_height,
-    int           num_cameras,
-    unsigned char* d_bgr_raw,
-    unsigned char* d_bgr_undistorted,
-    cudaStream_t  gst_stream,
-    cudaEvent_t   ev_frame_ready
-);
 
 
 // ------------------------------ MULTI-STREAM FRAME CAPTURE THREAD ------------------------------ //
@@ -96,5 +85,18 @@ void multi_stream_inference_thread_full_gpu(
     ClsDevParams* d_cls_params,
     ActionVis* d_vis, ActionVis* h_vis,
     int num_cameras,
+    cudaEvent_t ev_frame_ready
+);
+
+
+// ------------------------------ DISPLAY/PREP DEBUG THREAD ------------------------------ //
+
+void debug_vis_thread(
+    int num_cameras, 
+    int cap_width, 
+    int cap_height,
+    cudaStream_t stream_vis,
+    unsigned char* d_bgr_undistorted,
+    size_t frame_bytes,
     cudaEvent_t ev_frame_ready
 );

@@ -2,6 +2,8 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <iostream>
+#include <cuda.h>
 
 #include "cuda_structs.cuh" 
 
@@ -47,3 +49,16 @@ __device__ __forceinline__ unsigned char clamp_u8f(float v) {
     v = v < 0.f ? 0.f : (v > 255.f ? 255.f : v);
     return (unsigned char)(v + 0.5f);
 }
+
+// Simple CUDA driver error checker
+static void checkCu(CUresult r, const char* msg)
+{
+    if (r != CUDA_SUCCESS)
+    {
+        const char* errStr = nullptr;
+        cuGetErrorString(r, &errStr);
+        std::cerr << "[CUDA-EGL] " << msg << " failed: "
+                  << (errStr ? errStr : "unknown") << " (" << r << ")\n";
+    }
+}
+

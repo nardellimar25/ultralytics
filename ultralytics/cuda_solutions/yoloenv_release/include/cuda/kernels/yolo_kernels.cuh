@@ -6,6 +6,9 @@
 
 #include "cuda_structs.cuh"
 
+
+// -------------------------------- PRE PROCESS KERNELS ------------------------------ //
+
 // Generic BGR resize (used for YOLO input)
 __global__ void resize_bilinear_kernel_batched(
     uchar*       __restrict__ output_batch,
@@ -30,6 +33,20 @@ __global__ void preprocess_kernel_batched_half(
     int img_width, int img_height,
     int num_cameras
 );
+
+
+// Fused resize + preprocess: BGR (uint8) -> CHW (float/half), norm [0,1]
+__global__ void resize_preprocess_fused_batched_half(
+    __half* __restrict__ out_chw,          // [B,3,H,W]
+    const unsigned char* __restrict__ in_bgr, // [B,capH,capW,3]
+    int in_w, int in_h,
+    int out_w, int out_h,
+    float scale_x, float scale_y,
+    int B
+);
+
+
+// -------------------------------- POST PROCESS KERNELS ------------------------------ //
 
 // YOLO raw output -> Detection + mask
 __global__ void extract_detections_kernel_batched(

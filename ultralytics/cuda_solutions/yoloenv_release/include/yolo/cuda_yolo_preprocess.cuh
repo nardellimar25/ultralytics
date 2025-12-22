@@ -1,5 +1,5 @@
-#ifndef CUDA_PREPROCESS_CUH
-#define CUDA_PREPROCESS_CUH
+#ifndef CUDA_YOLO_PREPROCESS_CUH
+#define CUDA_YOLO_PREPROCESS_CUH
 
 #include <cuda_runtime.h>
 #include <cstddef>          
@@ -41,4 +41,4 @@ void yolo_preprocess_gpu_batched(
     cudaStream_t            stream
 );
 
-#endif // CUDA_PREPROCESS_CUH
+#endif // CUDA_YOLO_PREPROCESS_CUH
