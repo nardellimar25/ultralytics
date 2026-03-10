@@ -210,9 +210,10 @@ set(SOURCES
   # new : debug vis kernels
   ${SRC_DIR}/cuda/kernels/debug_vis_kernels.cu
 
-  # io TODO: delete old v4l2 read camera
+  # io 
   ${SRC_DIR}/io/debug_vis.cu
-
+  ${SRC_DIR}/io/udp_streamer_gst.cpp
+  
   # cuda frame decode/nvbufsurface
   ${PROJ_ROOT}/src/cuda_frame_decode/cuda_undistort.cu
   ${PROJ_ROOT}/src/cuda_frame_decode/cuda_nvmm_egl_upload.cu
@@ -230,13 +231,17 @@ target_compile_definitions(yolodetector PRIVATE
   ACTION_ENGINE_PATH="${ACTION_ENGINE_PATH}"
   DEBUG_VIS=1
   DEBUG_ONLY_FRAME=0
+  DEBUG_UDP=1
 )
 
-# // Debug visualization flags
-# // DEBUG_VIS | DEBUG_ONLY_FRAME
-# // 0 0 -> no window displayed
-# // 1 0 -> frame + bboxes + (not added blur, yet)
-# // 1 1 -> only frame
+# Debug visualization flags
+# DEBUG_VIS | DEBUG_ONLY_FRAME
+# 0 0 -> no window displayed
+# 1 0 -> frame + bboxes + (not added blur, yet)
+# 1 1 -> only frame
+# DEBUG_UDP
+# 0 -> use UDP
+# 1 -> use opencv windows
 
 # Warnings
 target_compile_options(yolodetector PRIVATE
